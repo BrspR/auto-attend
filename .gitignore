@@ -1,0 +1,16 @@
+# credentials — never commit this
+.env
+
+# browser cache and session data
+cache/class_urls.json
+
+# python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# runtime
+scheduler.log
+nohup.out
+*.png
