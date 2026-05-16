@@ -126,6 +126,32 @@ class LMSMain:
 
         return False
 
+    async def discover_class_url(self, class_name: str, keywords: list[str]) -> str | None:
+        """Login, scan the lesson list, return the myLesson URL for the matching class."""
+        ctx, page = await self._new_page()
+        try:
+            if not await self._login_page(page):
+                return None
+
+            await page.goto(f"{BASE_URL}/panel/home", wait_until="domcontentloaded", timeout=15000)
+            await page.wait_for_timeout(1000)
+
+            # All lesson links are /panel/myLesson/...
+            links = await page.locator("a[href*='/panel/myLesson/']").all()
+            for link in links:
+                text = (await link.inner_text()).strip()
+                href = await link.get_attribute("href") or ""
+                if any(kw in text for kw in keywords):
+                    url = href if href.startswith("http") else f"{BASE_URL}{href}"
+                    _cache = _load_cache()
+                    _cache[class_name] = url
+                    _save_cache(_cache)
+                    return url
+
+            return None
+        finally:
+            await ctx.close()
+
     async def attend_class(self, class_name: str, keywords: list[str]) -> bool:
         cache = _load_cache()
         lesson_url = cache.get(class_name)

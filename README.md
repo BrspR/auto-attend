@@ -1,28 +1,16 @@
 # AUT Auto-Attendance
 
-Automatically attends online classes on your behalf via the Amirkabir University of Technology (AUT) LMS systems. Logs in, finds the live session, clicks the attendance button, and holds the session open — all while you do something else.
+Automatically logs into AUT's LMS, finds your live class session, clicks the attendance button, and keeps the session open — all in the background while you do something else.
+
+**How it works:**
+- Fires at each class's scheduled start time
+- Waits **T+5 min**, then logs in and clicks `ورود`
+- If the session isn't live yet, retries at **T+15 min**
+- Holds the session open until the class ends (max 1h 45m)
 
 ---
 
-## How it works
-
-- Runs a background scheduler that fires at each class's start time
-- At **T+5 min**: logs into the LMS and clicks the "ورود" attendance button
-- If that fails: retries at **T+15 min**
-- Holds the session open for up to **1h 45m** (or until the class ends)
-- Logs everything to the terminal so you can see what's happening
-
----
-
-## Requirements
-
-- Python 3.11+
-- A Linux/macOS machine that stays on during class hours
-- Your AUT student ID and password
-
----
-
-## Setup
+## First-time setup
 
 ```bash
 git clone https://github.com/YOUR_USERNAME/auto-attend.git
@@ -30,133 +18,112 @@ cd auto-attend
 
 python3 -m venv .venv
 source .venv/bin/activate
-
 pip install -r requirements.txt
 playwright install chromium
 
 cp .env.example .env
-nano .env          # fill in your student ID and password
+nano .env                    # enter your student ID and password
+cp config.example.py config.py
+nano config.py               # add your classes (see format below)
 ```
 
-`.env` contents:
+### `.env`
 ```
 LMS_USERNAME=your.student.id
 LMS_PASSWORD=YourPassword
 ```
 
----
-
-## Configure your classes
-
-Open `config.py` and edit the `CLASSES` list. Each entry is a class you want the script to attend **on your behalf** (i.e. classes you skip).
+### `config.py` — your schedule
+Copy from `config.example.py` and fill in your classes:
 
 ```python
-{
-    "name": "نام درس 2",          # any label you want (used in logs)
-    "keywords": ["نام درس"],       # not used if URL is cached — safe to leave as-is
-    "days": [5, 0],                     # weekdays: 0=Mon 1=Tue 2=Wed 3=Thu 4=Fri 5=Sat 6=Sun
-    "start": "13:00",                   # class start time (24h, Tehran time)
-    "end": "15:00",                     # class end time
-    "lms": "main",                      # "main" or "nima" — see below
-},
+CLASSES = [
+    {
+        "name": "نام درس 2",       # any label (shows in logs)
+        "keywords": ["نام درس"],    # used to find the class URL automatically
+        "days": [5, 0],                  # 0=Mon 1=Tue 2=Wed 3=Thu 4=Fri 5=Sat 6=Sun
+        "start": "13:00",               # class start (24h, Tehran time)
+        "end":   "15:00",               # class end
+        "lms": "main",                  # "main" (Fararoom) or "nima" (Nima)
+    },
+]
 ```
 
-**Do NOT add classes you actually attend** — the script only handles the ones you skip.
+**Which LMS?**
 
----
-
-## Which LMS to use: `main` vs `nima`
-
-AUT has two separate online class systems:
-
-| System | URL | `lms` value |
-|--------|-----|-------------|
+| System | Site | `lms` value |
+|--------|------|-------------|
 | فراروم (Fararoom) | `lmshome.aut.ac.ir` | `"main"` |
 | نیما (Nima) | `lms.aut.ac.ir` | `"nima"` |
 
-**Almost every class uses `"main"`.**  
-The only known exception is **نام درس 1**, which uses `"nima"`.
-
-If you're not sure which one your class uses:
-- Go to `lmshome.aut.ac.ir/panel/home` when logged in
-- If your class appears there → use `"main"`
-- If it doesn't → try `lms.aut.ac.ir` → use `"nima"`
+Almost every class uses `"main"`. `"nima"` is typically only for نام درس.
 
 ---
 
-## Find your class URLs (do this once)
-
-After configuring `config.py`, run:
+## Start of semester (do once)
 
 ```bash
 source .venv/bin/activate
+
+# 1. Verify your credentials and see your class list
+python main.py --test-login
+
+# 2. Discover and cache class URLs (needed before scheduler can run)
 python main.py --discover
 ```
 
-This logs in and finds the URL for each class in `config.py`, saving them to `cache/class_urls.json`. You only need to do this once per semester (URLs change each term).
+`--discover` saves each class's URL to `cache/class_urls.json`. You only need to redo this at the start of each new semester, since URLs change every term.
 
-If a class is not found automatically, add it manually to `cache/class_urls.json`:
-
+If a class isn't found automatically, add it manually to `cache/class_urls.json`:
 ```json
 {
   "نام درس 2": "https://lmshome.aut.ac.ir/panel/myLesson/COURSE_ID/GROUP/TERM"
 }
 ```
-
-To find the URL manually: log into `lmshome.aut.ac.ir`, click on the class, and copy the URL from your browser.
-
----
-
-## Test before running
-
-```bash
-# Check credentials work on both LMS systems
-python main.py --test-login
-
-# See what the script would do today (no clicking)
-python main.py --dry-run
-```
+To find the URL: log into `lmshome.aut.ac.ir`, open the class, copy the URL from your browser.
 
 ---
 
-## Run
+## Every day
 
 ```bash
 source .venv/bin/activate
+
+# Optional: preview what runs today (no clicking)
+python main.py --dry-run
+
+# Start the scheduler — keep it running all day
 python main.py
 ```
 
-Keep the terminal open, or use `screen` / `tmux` to run it in the background:
-
+To run in the background (survives closing the terminal):
 ```bash
 screen -S attend
-python main.py
-# Ctrl+A then D to detach
-# screen -r attend to reattach
+source .venv/bin/activate && python main.py
+# Ctrl+A then D  →  detach
+# screen -r attend  →  reattach
 ```
 
-Watch logs live:
+Watch the logs:
 ```bash
 tail -f scheduler.log
 ```
 
-Stop:
+Stop it:
 ```bash
-# find the PID
-pgrep -f "python main.py"
-kill <PID>
+pkill -f "python main.py"
 ```
 
-**The script must be running while your laptop/PC is on.** It does not run on a server — if your machine is off during class time, it won't attend. Use a machine that stays on, or a cheap VPS.
+> **Your machine must be on and the script must be running during class time.**  
+> If your laptop sleeps or the script isn't running, attendance won't be recorded.
 
 ---
 
-## Updating each semester
+## New semester checklist
 
-Class URLs change every term. At the start of a new semester:
 1. Delete `cache/class_urls.json`
-2. Update times in `config.py` if your schedule changed
-3. Run `python main.py --discover` again
+2. Update `config.py` with your new schedule
+3. Run `python main.py --discover` to re-cache URLs
 
 ---
 
@@ -164,22 +131,15 @@ Class URLs change every term. At the start of a new semester:
 
 ```
 auto-attend/
-├── main.py          # entry point + CLI flags
-├── config.py        # YOUR SCHEDULE — edit this
-├── lms_main.py      # Fararoom (lmshome.aut.ac.ir) automation
-├── lms_nima.py   # Nima (lms.aut.ac.ir) automation
-├── scheduler.py     # timing logic
+├── main.py             # entry point — all CLI flags live here
+├── config.py           # YOUR schedule (gitignored — private)
+├── config.example.py   # template to copy from
+├── lms_main.py         # Fararoom automation (lmshome.aut.ac.ir)
+├── lms_nima.py         # Nima automation (lms.aut.ac.ir)
+├── scheduler.py        # timing and job scheduling
 ├── requirements.txt
-├── .env.example     # copy to .env and fill in credentials
-└── cache/           # auto-generated, gitignored
-    └── class_urls.json
+├── .env                # your credentials (gitignored — private)
+├── .env.example        # template to copy from
+└── cache/
+    └── class_urls.json # auto-generated, gitignored
 ```
-
----
-
-## Notes
-
-- The script uses a headless browser (invisible Chrome) — it won't interrupt your work
-- Attendance is only recorded when the professor has opened the session; if they open it late the T+15 retry handles it
-- `cache/class_urls.json` is gitignored — each user generates their own based on their enrolled groups
-- `.env` is gitignored — never commit your password
