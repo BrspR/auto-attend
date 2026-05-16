@@ -20,6 +20,12 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+# Playwright requires SelectorEventLoop on Windows
+import sys
+if sys.platform == 'win32':
+    import asyncio as _asyncio
+    _asyncio.set_event_loop_policy(_asyncio.WindowsSelectorEventLoopPolicy())
+
 load_dotenv(Path(__file__).parent / ".env")
 
 logging.basicConfig(

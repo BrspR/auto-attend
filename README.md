@@ -10,7 +10,17 @@ Automatically logs into AUT's LMS, finds your live class session, clicks the att
 
 ---
 
-## First-time setup
+## Requirements
+
+- Python 3.11+
+- Your AUT student ID and password
+- A machine that stays **on** during class hours
+
+---
+
+## Setup
+
+### Linux / macOS
 
 ```bash
 git clone https://github.com/YOUR_USERNAME/auto-attend.git
@@ -22,29 +32,54 @@ pip install -r requirements.txt
 playwright install chromium
 
 cp .env.example .env
-nano .env                    # enter your student ID and password
+nano .env                  # enter your student ID and password
+
 cp config.example.py config.py
-nano config.py               # add your classes (see format below)
+nano config.py             # add your class schedule
 ```
 
-### `.env`
+### Windows
+
+```powershell
+git clone https://github.com/YOUR_USERNAME/auto-attend.git
+cd auto-attend
+
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+playwright install chromium
+
+copy .env.example .env
+notepad .env               # enter your student ID and password
+
+copy config.example.py config.py
+notepad config.py          # add your class schedule
+```
+
+---
+
+## Credentials — `.env`
+
 ```
 LMS_USERNAME=your.student.id
 LMS_PASSWORD=YourPassword
 ```
 
-### `config.py` — your schedule
-Copy from `config.example.py` and fill in your classes:
+---
+
+## Configure your classes — `config.py`
+
+Copy from `config.example.py` and fill in your own schedule:
 
 ```python
 CLASSES = [
     {
         "name": "نام درس 2",       # any label (shows in logs)
-        "keywords": ["نام درس"],    # used to find the class URL automatically
+        "keywords": ["نام درس"],    # used to auto-find the class URL
         "days": [5, 0],                  # 0=Mon 1=Tue 2=Wed 3=Thu 4=Fri 5=Sat 6=Sun
         "start": "13:00",               # class start (24h, Tehran time)
         "end":   "15:00",               # class end
-        "lms": "main",                  # "main" (Fararoom) or "nima" (Nima)
+        "lms": "main",                  # "main" = Fararoom, "nima" = Nima
     },
 ]
 ```
@@ -56,74 +91,98 @@ CLASSES = [
 | فراروم (Fararoom) | `lmshome.aut.ac.ir` | `"main"` |
 | نیما (Nima) | `lms.aut.ac.ir` | `"nima"` |
 
-Almost every class uses `"main"`. `"nima"` is typically only for نام درس.
+Almost all classes use `"main"`. Use `"nima"` only for classes hosted on `lms.aut.ac.ir` (e.g. نام درس, نام درس).
 
 ---
 
-## Start of semester (do once)
+## First-time setup (do once per semester)
+
+**Step 1 — Verify login and see your class list:**
 
 ```bash
+# Linux/macOS
 source .venv/bin/activate
-
-# 1. Verify your credentials and see your class list
 python main.py --test-login
 
-# 2. Discover and cache class URLs (needed before scheduler can run)
+# Windows
+.venv\Scripts\activate
+python main.py --test-login
+```
+
+**Step 2 — Discover and cache class URLs:**
+
+```bash
 python main.py --discover
 ```
 
-`--discover` saves each class's URL to `cache/class_urls.json`. You only need to redo this at the start of each new semester, since URLs change every term.
+This logs in and finds the session URL for each Fararoom class, saving to `cache/class_urls.json`. Nima classes use the announcements page automatically — no URL needed.
 
-If a class isn't found automatically, add it manually to `cache/class_urls.json`:
+If a Fararoom class isn't found automatically, add it manually to `cache/class_urls.json`:
 ```json
 {
   "نام درس 2": "https://lmshome.aut.ac.ir/panel/myLesson/COURSE_ID/GROUP/TERM"
 }
 ```
-To find the URL: log into `lmshome.aut.ac.ir`, open the class, copy the URL from your browser.
 
 ---
 
 ## Every day
 
+### Linux / macOS
+
 ```bash
 source .venv/bin/activate
-
-# Optional: preview what runs today (no clicking)
-python main.py --dry-run
-
-# Start the scheduler — keep it running all day
-python main.py
+python main.py --dry-run   # optional: preview today's classes
+python main.py             # start the scheduler
 ```
 
-To run in the background (survives closing the terminal):
+Run in the background (survives closing the terminal):
 ```bash
 screen -S attend
 source .venv/bin/activate && python main.py
-# Ctrl+A then D  →  detach
-# screen -r attend  →  reattach
+# Ctrl+A then D to detach
+# screen -r attend to reattach
 ```
 
-Watch the logs:
+### Windows
+
+Double-click **`run.bat`** — it activates the environment and starts the scheduler in one click.
+
+Or from PowerShell:
+```powershell
+.venv\Scripts\activate
+python main.py --dry-run   # optional: preview today's classes
+python main.py             # start the scheduler
+```
+
+Run in the background (survives closing the window):
+```powershell
+Start-Process python -ArgumentList "main.py" -WindowStyle Minimized
+```
+
+---
+
+## Watch the logs
+
 ```bash
-tail -f scheduler.log
+tail -f scheduler.log      # Linux/macOS
+Get-Content scheduler.log -Wait   # Windows PowerShell
 ```
 
-Stop it:
+## Stop the scheduler
+
 ```bash
-pkill -f "python main.py"
+pkill -f "python main.py"      # Linux/macOS
+taskkill /F /IM python.exe     # Windows
 ```
-
-> **Your machine must be on and the script must be running during class time.**  
-> If your laptop sleeps or the script isn't running, attendance won't be recorded.
 
 ---
 
 ## New semester checklist
 
 1. Delete `cache/class_urls.json`
-2. Update `config.py` with your new schedule
-3. Run `python main.py --discover` to re-cache URLs
+2. Update times/days in `config.py` if your schedule changed
+3. Run `python main.py --discover` again
 
 ---
 
@@ -131,15 +190,19 @@ pkill -f "python main.py"
 
 ```
 auto-attend/
-├── main.py             # entry point — all CLI flags live here
+├── main.py             # entry point — all CLI flags
 ├── config.py           # YOUR schedule (gitignored — private)
 ├── config.example.py   # template to copy from
 ├── lms_main.py         # Fararoom automation (lmshome.aut.ac.ir)
 ├── lms_nima.py         # Nima automation (lms.aut.ac.ir)
 ├── scheduler.py        # timing and job scheduling
+├── run.bat             # Windows one-click launcher
 ├── requirements.txt
 ├── .env                # your credentials (gitignored — private)
 ├── .env.example        # template to copy from
 └── cache/
     └── class_urls.json # auto-generated, gitignored
 ```
+
+> **Your machine must be on and the script must be running during class time.**
+> If your laptop sleeps or the terminal closes without `screen`/background mode, attendance won't be recorded.
