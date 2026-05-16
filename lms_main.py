@@ -75,7 +75,9 @@ class LMSMain:
             await user_input.fill(self.username)
             await page.locator("input[type='password']").first.fill(self.password)
             await page.locator("button[type='submit'], input[type='submit']").first.click()
-            await page.wait_for_load_state("networkidle", timeout=20000)
+            # networkidle times out on AUT dashboard (background polling) — wait for navigation instead
+            await page.wait_for_load_state("domcontentloaded", timeout=20000)
+            await page.wait_for_timeout(2000)
         except Exception as e:
             logger.error(f"Login error: {e}")
             return False

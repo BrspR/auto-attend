@@ -43,26 +43,35 @@ def get_credentials() -> tuple[str, str]:
 
 async def cmd_test_login(username: str, password: str):
     from lms_main import LMSMain
-    from lms_andishe import LMSAndishe
+    from lms_nima import LMSNima
+    from config import CLASSES
 
-    logger.info("=== Testing Main LMS Login ===")
+    logger.info("=== Testing Main LMS (Fararoom) Login ===")
     lms = LMSMain(username, password)
     await lms.start()
-    from playwright.async_api import async_playwright
     ctx, page = await lms._new_page()
-    ok = await lms._login_page(page)
-    logger.info(f"Main LMS login: {'SUCCESS' if ok else 'FAILED'}")
+    main_ok = await lms._login_page(page)
+    logger.info(f"Main LMS login: {'SUCCESS' if main_ok else 'FAILED'}")
     await ctx.close()
     await lms.stop()
 
-    logger.info("=== Testing Andishe LMS Login ===")
-    andishe = LMSAndishe(username, password)
-    await andishe.start()
-    ctx, page = await andishe._new_page()
-    ok = await andishe._login_page(page)
-    logger.info(f"Andishe LMS login: {'SUCCESS' if ok else 'FAILED'}")
+    logger.info("=== Testing Nima LMS Login ===")
+    nima = LMSNima(username, password)
+    await nima.start()
+    ctx, page = await nima._new_page()
+    nima_ok = await nima._login_page(page)
+    logger.info(f"Nima LMS login: {'SUCCESS' if nima_ok else 'FAILED'}")
     await ctx.close()
-    await andishe.stop()
+    await nima.stop()
+
+    logger.info("\n=== Your Scheduled Classes ===")
+    day_names = {0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu", 4: "Fri", 5: "Sat", 6: "Sun"}
+    for cls in CLASSES:
+        days = ", ".join(day_names[d] for d in cls["days"])
+        lms_label = "Fararoom (main)" if cls["lms"] == "main" else "Nima"
+        ok = main_ok if cls["lms"] == "main" else nima_ok
+        status = "✓" if ok else "✗ (login failed)"
+        logger.info(f"  {status}  {cls['name']}  [{days}]  {cls['start']}–{cls['end']}  ({lms_label})")
 
 
 async def cmd_discover(username: str, password: str):
@@ -137,6 +146,7 @@ async def main():
     logger.info("=" * 60)
     from scheduler import run_scheduler
     await run_scheduler(username, password)
+
 
 
 if __name__ == "__main__":

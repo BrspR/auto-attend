@@ -9,7 +9,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from config import CLASSES, TIMEZONE, MAX_STAY_MINUTES, FIRST_TRY_MINUTES, SECOND_TRY_MINUTES
 from lms_main import LMSMain
-from lms_andishe import LMSAndishe
+from lms_nima import LMSNima
 
 logger = logging.getLogger(__name__)
 
@@ -17,26 +17,26 @@ logger = logging.getLogger(__name__)
 _DAY_MAP = {0: "mon", 1: "tue", 2: "wed", 3: "thu", 4: "fri", 5: "sat", 6: "sun"}
 
 
-async def _attempt(lms_main: LMSMain, lms_andishe: LMSAndishe, cls: dict, hold_until_ts: float) -> bool:
+async def _attempt(lms_main: LMSMain, lms_nima: LMSNima, cls: dict, hold_until_ts: float) -> bool:
     name = cls["name"]
     lms_type = cls["lms"]
 
-    if lms_type == "andishe":
-        success = await lms_andishe.attend_class(name)
+    if lms_type == "nima":
+        success = await lms_nima.attend_class(name)
     else:
         success = await lms_main.attend_class(name, cls["keywords"])
 
     if success:
         logger.info(f"[{name}] Attendance confirmed — holding until {datetime.fromtimestamp(hold_until_ts, tz=TIMEZONE).strftime('%H:%M')}")
-        if lms_type == "andishe":
-            asyncio.create_task(lms_andishe.attend_and_hold(name, hold_until_ts))
+        if lms_type == "nima":
+            asyncio.create_task(lms_nima.attend_and_hold(name, hold_until_ts))
         else:
             asyncio.create_task(lms_main.attend_and_hold(name, cls["keywords"], None, hold_until_ts))
 
     return success
 
 
-async def attend_job(lms_main: LMSMain, lms_andishe: LMSAndishe, cls: dict):
+async def attend_job(lms_main: LMSMain, lms_nima: LMSNima, cls: dict):
     name = cls["name"]
     now = datetime.now(tz=TIMEZONE)
 
@@ -52,7 +52,7 @@ async def attend_job(lms_main: LMSMain, lms_andishe: LMSAndishe, cls: dict):
     # Wait T+5 minutes
     await asyncio.sleep(FIRST_TRY_MINUTES * 60)
     logger.info(f"[{name}] First attempt (T+{FIRST_TRY_MINUTES}min)...")
-    success = await _attempt(lms_main, lms_andishe, cls, hold_until_ts)
+    success = await _attempt(lms_main, lms_nima, cls, hold_until_ts)
 
     if success:
         return
@@ -62,7 +62,7 @@ async def attend_job(lms_main: LMSMain, lms_andishe: LMSAndishe, cls: dict):
     logger.info(f"[{name}] First attempt failed. Waiting {remaining_wait//60} more min for second try...")
     await asyncio.sleep(remaining_wait)
     logger.info(f"[{name}] Second attempt (T+{SECOND_TRY_MINUTES}min)...")
-    success = await _attempt(lms_main, lms_andishe, cls, hold_until_ts)
+    success = await _attempt(lms_main, lms_nima, cls, hold_until_ts)
 
     if not success:
         logger.warning(f"[{name}] Both attempts failed — attendance not recorded today")
@@ -86,10 +86,10 @@ def _is_class_in_progress(cls: dict) -> tuple[bool, float]:
 
 async def run_scheduler(username: str, password: str):
     lms_main = LMSMain(username, password)
-    lms_andishe = LMSAndishe(username, password)
+    lms_nima = LMSNima(username, password)
 
     await lms_main.start()
-    await lms_andishe.start()
+    await lms_nima.start()
 
     scheduler = AsyncIOScheduler(timezone=TIMEZONE)
 
@@ -100,7 +100,7 @@ async def run_scheduler(username: str, password: str):
         scheduler.add_job(
             attend_job,
             CronTrigger(day_of_week=days_str, hour=start_h, minute=start_m, timezone=TIMEZONE),
-            args=[lms_main, lms_andishe, cls],
+            args=[lms_main, lms_nima, cls],
             id=cls["name"],
             name=cls["name"],
             misfire_grace_time=60,
@@ -121,10 +121,10 @@ async def run_scheduler(username: str, password: str):
 
             # Attempt immediately without T+5 delay if we're between T+5 and T+15
             if elapsed_secs >= FIRST_TRY_MINUTES * 60:
-                asyncio.create_task(_attempt(lms_main, lms_andishe, cls, hold_until_ts))
+                asyncio.create_task(_attempt(lms_main, lms_nima, cls, hold_until_ts))
             else:
                 # Class just started, run full job logic
-                asyncio.create_task(attend_job(lms_main, lms_andishe, cls))
+                asyncio.create_task(attend_job(lms_main, lms_nima, cls))
 
     scheduler.start()
     logger.info("Scheduler running. Press Ctrl+C to stop.\n")
@@ -136,4 +136,4 @@ async def run_scheduler(username: str, password: str):
         logger.info("Shutting down...")
         scheduler.shutdown()
         await lms_main.stop()
-        await lms_andishe.stop()
+        await lms_nima.stop()

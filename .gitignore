@@ -1,5 +1,6 @@
-# credentials — never commit this
+# credentials and personal schedule — never commit these
 .env
+config.py
 
 # browser cache and session data
 cache/class_urls.json

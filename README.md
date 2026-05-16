@@ -57,7 +57,7 @@ Open `config.py` and edit the `CLASSES` list. Each entry is a class you want the
     "days": [5, 0],                     # weekdays: 0=Mon 1=Tue 2=Wed 3=Thu 4=Fri 5=Sat 6=Sun
     "start": "13:00",                   # class start time (24h, Tehran time)
     "end": "15:00",                     # class end time
-    "lms": "main",                      # "main" or "andishe" — see below
+    "lms": "main",                      # "main" or "nima" — see below
 },
 ```
 
@@ -65,22 +65,22 @@ Open `config.py` and edit the `CLASSES` list. Each entry is a class you want the
 
 ---
 
-## Which LMS to use: `main` vs `andishe`
+## Which LMS to use: `main` vs `nima`
 
 AUT has two separate online class systems:
 
 | System | URL | `lms` value |
 |--------|-----|-------------|
 | فراروم (Fararoom) | `lmshome.aut.ac.ir` | `"main"` |
-| نیما (Nima) | `lms.aut.ac.ir` | `"andishe"` |
+| نیما (Nima) | `lms.aut.ac.ir` | `"nima"` |
 
 **Almost every class uses `"main"`.**  
-The only known exception is **نام درس**, which uses `"andishe"`.
+The only known exception is **نام درس 1**, which uses `"nima"`.
 
 If you're not sure which one your class uses:
 - Go to `lmshome.aut.ac.ir/panel/home` when logged in
 - If your class appears there → use `"main"`
-- If it doesn't → try `lms.aut.ac.ir` → use `"andishe"`
+- If it doesn't → try `lms.aut.ac.ir` → use `"nima"`
 
 ---
 
@@ -167,7 +167,7 @@ auto-attend/
 ├── main.py          # entry point + CLI flags
 ├── config.py        # YOUR SCHEDULE — edit this
 ├── lms_main.py      # Fararoom (lmshome.aut.ac.ir) automation
-├── lms_andishe.py   # Nima (lms.aut.ac.ir) automation
+├── lms_nima.py   # Nima (lms.aut.ac.ir) automation
 ├── scheduler.py     # timing logic
 ├── requirements.txt
 ├── .env.example     # copy to .env and fill in credentials
