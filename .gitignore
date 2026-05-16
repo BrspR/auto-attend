@@ -15,3 +15,4 @@ __pycache__/
 scheduler.log
 nohup.out
 *.png
+.claude/
