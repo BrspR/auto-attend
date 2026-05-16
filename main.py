@@ -81,14 +81,12 @@ async def cmd_discover(username: str, password: str):
     lms = LMSMain(username, password)
     await lms.start()
 
-    logger.info("=== Discovering class URLs ===")
-    for cls in CLASSES:
-        if cls["lms"] == "main":
-            url = await lms.discover_class_url(cls["name"], cls["keywords"])
-            if url:
-                logger.info(f"✓ {cls['name']}: {url}")
-            else:
-                logger.warning(f"✗ {cls['name']}: NOT FOUND — add manually to cache/class_urls.json")
+    logger.info("=== Discovering class URLs (single login session) ===")
+    main_classes = [cls for cls in CLASSES if cls["lms"] == "main"]
+    found = await lms.discover_all_urls(main_classes)
+    logger.info(f"\nDiscovered {len(found)}/{len(main_classes)} class URLs")
+    if len(found) < len(main_classes):
+        logger.info("For any missing classes, add URLs manually to cache/class_urls.json")
 
     await lms.stop()
 

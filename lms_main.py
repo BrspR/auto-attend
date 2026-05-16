@@ -67,7 +67,7 @@ class LMSMain:
         logger.info("Logging into main LMS via SSO...")
         try:
             await sso_btn.first.click()
-            await page.wait_for_load_state("networkidle", timeout=15000)
+            await page.wait_for_load_state("domcontentloaded", timeout=15000)
             logger.info(f"SSO page: {page.url}")
 
             await page.wait_for_selector("input[type='password']", timeout=10000)
@@ -105,12 +105,13 @@ class LMSMain:
         for pg in range(max_page, 0, -1):
             if pg != 1:
                 pg_url = page.url.split("?")[0] + f"?page={pg}"
-                await page.goto(pg_url, wait_until="networkidle", timeout=15000)
+                await page.goto(pg_url, wait_until="domcontentloaded", timeout=15000)
 
-            # Any "ورود" link/button that is NOT the nav (logout/profile links)
+            # Blue ورود button in a table cell (active session join button)
             attend_btn = page.locator(
                 "td a:has-text('ورود'), "
                 "td button:has-text('ورود'), "
+                "a.btn-primary:has-text('ورود'), "
                 "a.btn:has-text('ورود'), "
                 "button.btn:has-text('ورود')"
             ).first
@@ -120,35 +121,88 @@ class LMSMain:
 
             if count > 0:
                 await attend_btn.click()
-                await page.wait_for_load_state("networkidle", timeout=10000)
+                await page.wait_for_load_state("domcontentloaded", timeout=10000)
+                await page.wait_for_timeout(1000)
                 logger.info(f"[{class_name}] ✓ Attendance clicked! Now at: {page.url}")
                 return True
 
         return False
 
-    async def discover_class_url(self, class_name: str, keywords: list[str]) -> str | None:
-        """Login, scan the lesson list, return the myLesson URL for the matching class."""
+    async def discover_all_urls(self, classes: list[dict]) -> dict[str, str]:
+        """
+        Login once, scrape the home page, and return {class_name: url} for every
+        matched class. Uses longest-keyword-wins to avoid substring collisions
+        (e.g. "نام درس" vs "نام درس"). Saves to cache.
+        """
+        found: dict[str, str] = {}
         ctx, page = await self._new_page()
         try:
             if not await self._login_page(page):
-                return None
+                logger.error("Cannot discover URLs — login failed")
+                return found
 
             await page.goto(f"{BASE_URL}/panel/home", wait_until="domcontentloaded", timeout=15000)
-            await page.wait_for_timeout(1000)
+            # Wait for the JS-rendered class list to appear
+            await page.wait_for_timeout(3000)
 
-            # All lesson links are /panel/myLesson/...
-            links = await page.locator("a[href*='/panel/myLesson/']").all()
-            for link in links:
-                text = (await link.inner_text()).strip()
-                href = await link.get_attribute("href") or ""
-                if any(kw in text for kw in keywords):
+            # Dump ALL link text+href pairs to Python once — avoids stale DOM refs
+            all_links: list[dict] = await page.evaluate("""
+                () => Array.from(document.querySelectorAll('a[href]')).map(a => ({
+                    text: a.innerText.trim(),
+                    href: a.getAttribute('href') || ''
+                }))
+            """)
+
+            remaining = {cls["name"]: cls for cls in classes}
+
+            for link in all_links:
+                if not remaining:
+                    break
+                text = link["text"]
+                href = link["href"]
+                if not href or href.startswith("#") or "javascript" in href:
+                    continue
+
+                # Longest-matching keyword wins — prevents "نام درس" matching
+                # a link meant for "نام درس"
+                best_name, best_kw_len = None, 0
+                for name, cls in remaining.items():
+                    for kw in cls["keywords"]:
+                        if kw in text and len(kw) > best_kw_len:
+                            best_name, best_kw_len = name, len(kw)
+
+                if best_name is None:
+                    continue
+
+                # Resolve URL
+                if "/panel/myLesson/" in href:
                     url = href if href.startswith("http") else f"{BASE_URL}{href}"
-                    _cache = _load_cache()
-                    _cache[class_name] = url
-                    _save_cache(_cache)
-                    return url
+                else:
+                    # Navigate to the link and check where it lands
+                    target = href if href.startswith("http") else f"{BASE_URL}{href}"
+                    try:
+                        await page.goto(target, wait_until="domcontentloaded", timeout=12000)
+                        url = page.url if "/panel/myLesson/" in page.url else None
+                    except Exception:
+                        url = None
+                    finally:
+                        await page.goto(f"{BASE_URL}/panel/home", wait_until="domcontentloaded", timeout=15000)
+                        await page.wait_for_timeout(800)
 
-            return None
+                if url:
+                    found[best_name] = url
+                    del remaining[best_name]
+                    logger.info(f"✓ {best_name}: {url}")
+
+            # Persist all found URLs to cache
+            cache = _load_cache()
+            cache.update(found)
+            _save_cache(cache)
+
+            for name in remaining:
+                logger.warning(f"✗ {name}: NOT FOUND — add manually to cache/class_urls.json")
+
+            return found
         finally:
             await ctx.close()
 
@@ -167,7 +221,7 @@ class LMSMain:
             if not await self._login_page(page):
                 return False
 
-            await page.goto(meetings_url, wait_until="networkidle", timeout=15000)
+            await page.goto(meetings_url, wait_until="domcontentloaded", timeout=15000)
             found = await self._find_attend_button(page, class_name)
 
             if not found:
@@ -201,7 +255,7 @@ class LMSMain:
             if not await self._login_page(page):
                 return
 
-            await page.goto(meetings_url, wait_until="networkidle", timeout=15000)
+            await page.goto(meetings_url, wait_until="domcontentloaded", timeout=15000)
 
             remaining = hold_until_ts - time.time()
             logger.info(f"[{class_name}] Holding for {remaining/60:.1f} min until {__import__('datetime').datetime.fromtimestamp(hold_until_ts).strftime('%H:%M')}")
