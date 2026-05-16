@@ -76,19 +76,31 @@ async def cmd_test_login(username: str, password: str):
 
 async def cmd_discover(username: str, password: str):
     from lms_main import LMSMain
+    from lms_nima import LMSNima
     from config import CLASSES
+
+    main_classes = [cls for cls in CLASSES if cls["lms"] == "main"]
+    nima_classes = [cls for cls in CLASSES if cls["lms"] == "nima"]
 
     lms = LMSMain(username, password)
     await lms.start()
-
-    logger.info("=== Discovering class URLs (single login session) ===")
-    main_classes = [cls for cls in CLASSES if cls["lms"] == "main"]
-    found = await lms.discover_all_urls(main_classes)
-    logger.info(f"\nDiscovered {len(found)}/{len(main_classes)} class URLs")
-    if len(found) < len(main_classes):
-        logger.info("For any missing classes, add URLs manually to cache/class_urls.json")
-
+    logger.info("=== Discovering Fararoom class URLs ===")
+    main_found = await lms.discover_all_urls(main_classes)
+    logger.info(f"Fararoom: {len(main_found)}/{len(main_classes)} URLs found")
     await lms.stop()
+
+    nima = LMSNima(username, password)
+    await nima.start()
+    logger.info("\n=== Discovering Nima class URLs ===")
+    nima_found = await nima.discover_all_urls(nima_classes)
+    logger.info(f"Nima: noted {len(nima_found)}/{len(nima_classes)} classes")
+    await nima.stop()
+
+    total = len(main_found) + len(nima_found)
+    total_classes = len(main_classes) + len(nima_classes)
+    logger.info(f"\nTotal: {total}/{total_classes} classes ready")
+    if total < total_classes:
+        logger.info("For missing Fararoom classes, add URLs manually to cache/class_urls.json")
 
 
 def cmd_dry_run():

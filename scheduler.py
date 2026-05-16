@@ -22,14 +22,14 @@ async def _attempt(lms_main: LMSMain, lms_nima: LMSNima, cls: dict, hold_until_t
     lms_type = cls["lms"]
 
     if lms_type == "nima":
-        success = await lms_nima.attend_class(name)
+        success = await lms_nima.attend_class(name, cls["keywords"])
     else:
         success = await lms_main.attend_class(name, cls["keywords"])
 
     if success:
         logger.info(f"[{name}] Attendance confirmed — holding until {datetime.fromtimestamp(hold_until_ts, tz=TIMEZONE).strftime('%H:%M')}")
         if lms_type == "nima":
-            asyncio.create_task(lms_nima.attend_and_hold(name, hold_until_ts))
+            asyncio.create_task(lms_nima.attend_and_hold(name, cls["keywords"], hold_until_ts))
         else:
             asyncio.create_task(lms_main.attend_and_hold(name, cls["keywords"], None, hold_until_ts))
 
