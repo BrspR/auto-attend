@@ -1,7 +1,6 @@
 import asyncio
 import json
 import logging
-import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -22,14 +21,6 @@ def _load_cache() -> dict:
 def _save_cache(cache: dict):
     CACHE_FILE.parent.mkdir(exist_ok=True)
     CACHE_FILE.write_text(json.dumps(cache, ensure_ascii=False, indent=2))
-
-
-def _meetings_url(lesson_url: str) -> str:
-    """Convert /panel/myLesson/COURSE/GROUP/TERM → /panel/getMeetingsLesson/COURSE/GROUP"""
-    m = re.search(r"/panel/myLesson/(\d+)/(\w+)/", lesson_url)
-    if m:
-        return f"{BASE_URL}/panel/getMeetingsLesson/{m.group(1)}/{m.group(2)}"
-    return lesson_url
 
 
 class LMSMain:
@@ -87,76 +78,47 @@ class LMSMain:
 
     async def _join_bbb_session(self, page: Page, class_name: str) -> str | None:
         """
-        Fararoom session attendance flow:
-          1. Sessions page lists each session with a collapsed row
-          2. Click the '+' button next to a session row to expand it
-          3. Inside the expanded row: a blue 'لینک ورود / ورود به جلسه / BigBlueButton' link
-          4. Navigate to that link's href directly (avoids new-tab issues)
-          5. Return the BBB URL we landed on, or None if no live session found
-        Checks pages last→first so the most recent session is tried first.
+        Join a live BBB session from the /panel/myLesson/ page.
+
+        The page shows a "جلسات امروز من" table with columns:
+          روز | تاریخ | ساعت شروع | ساعت پایان | مدرس | نوع جلسه | وضعیت جلسه | لینک ورود
+
+        When a session is live ("در حال برگزاری"), the لینک ورود column contains
+        a green button labelled "ورود به جلسه بیگبلوباتن" whose href is the BBB URL
+        (typically starts with blue3...).
+
+        Fallback: submit <form action="https://lmshome.aut.ac.ir/join"> if present.
         """
-        # Detect pagination
-        page_links = await page.locator("a.page-link[href*='?page=']").all()
-        max_page = 1
-        for lnk in page_links:
-            href = await lnk.get_attribute("href") or ""
-            m = re.search(r"\?page=(\d+)", href)
-            if m:
-                max_page = max(max_page, int(m.group(1)))
+        await page.wait_for_timeout(1500)
 
-        logger.info(f"[{class_name}] Sessions list: {max_page} page(s), scanning last→first")
+        # Primary: green join button in the لینک ورود column
+        join_btn = page.locator(
+            "a:has-text('ورود به جلسه')"
+            ", a:has-text('بیگبلوباتن')"
+            ", a.btn-success"
+            ", a[href*='blue3']"
+            ", a[href*='bigbluebutton']"
+        ).first
 
-        for pg in range(max_page, 0, -1):
-            if pg != 1:
-                pg_url = page.url.split("?")[0] + f"?page={pg}"
-                await page.goto(pg_url, wait_until="domcontentloaded", timeout=15000)
-                await page.wait_for_timeout(500)
+        if await join_btn.count() > 0:
+            bbb_href = await join_btn.get_attribute("href") or ""
+            logger.info(f"[{class_name}] BBB link found: {bbb_href[:120]}")
+            target = bbb_href if bbb_href.startswith("http") else f"{BASE_URL}{bbb_href}"
+            await page.goto(target, wait_until="domcontentloaded", timeout=25000)
+            logger.info(f"[{class_name}] ✓ Joined BBB! Now at: {page.url}")
+            return page.url
 
-            # Find all + expand triggers (accordion toggles) on this page
-            expand_btns = page.locator(
-                "button:has-text('+')"
-                ", [data-toggle='collapse']"
-                ", [data-bs-toggle='collapse']"
-                ", td button"
-            )
-            btn_count = await expand_btns.count()
-            logger.info(f"[{class_name}] Page {pg}: {btn_count} session row(s) found")
+        # Fallback: form-based join
+        join_form = page.locator("form[action*='/join']").first
+        if await join_form.count() > 0:
+            submit = join_form.locator("button[type='submit'], input[type='submit']").first
+            if await submit.count() > 0:
+                await submit.click()
+                await page.wait_for_load_state("domcontentloaded", timeout=25000)
+                logger.info(f"[{class_name}] ✓ Joined via form! Now at: {page.url}")
+                return page.url
 
-            # Try rows in reverse order (bottom = most recent session)
-            for i in range(btn_count - 1, -1, -1):
-                btn = expand_btns.nth(i)
-                try:
-                    await btn.click()
-                    await page.wait_for_timeout(800)  # let accordion expand
-
-                    # Look for the blue BBB join link in the now-expanded content
-                    join_link = page.locator(
-                        "a:has-text('لینک ورود')"
-                        ", a:has-text('ورود به جلسه')"
-                        ", a:has-text('BigBlueButton')"
-                        ", a.btn-primary:has-text('ورود')"
-                        ", a[href*='bigbluebutton']"
-                        ", a[href*='/join']"
-                    ).first
-
-                    if await join_link.count() > 0:
-                        bbb_href = await join_link.get_attribute("href") or ""
-                        logger.info(f"[{class_name}] BBB link found: {bbb_href[:100]}")
-
-                        # Navigate directly to BBB URL to avoid new-tab handling
-                        target = bbb_href if bbb_href.startswith("http") else f"{BASE_URL}{bbb_href}"
-                        await page.goto(target, wait_until="domcontentloaded", timeout=25000)
-                        logger.info(f"[{class_name}] ✓ Joined BBB! Now at: {page.url}")
-                        return page.url
-
-                    # No join link in this row — collapse it and try the next
-                    await btn.click()
-                    await page.wait_for_timeout(300)
-
-                except Exception as e:
-                    logger.debug(f"[{class_name}] Row {i} expand error: {e}")
-                    continue
-
+        logger.warning(f"[{class_name}] No join button or form found — session not live yet")
         return None
 
     async def discover_all_urls(self, classes: list[dict]) -> dict[str, str]:
@@ -239,15 +201,14 @@ class LMSMain:
             logger.error(f"[{class_name}] No URL in cache — run --discover first")
             return False
 
-        meetings_url = _meetings_url(lesson_url)
-        logger.info(f"[{class_name}] Checking sessions at: {meetings_url}")
+        logger.info(f"[{class_name}] Navigating to lesson page: {lesson_url}")
 
         ctx, page = await self._new_page()
         try:
             if not await self._login_page(page):
                 return False
 
-            await page.goto(meetings_url, wait_until="domcontentloaded", timeout=15000)
+            await page.goto(lesson_url, wait_until="domcontentloaded", timeout=15000)
             bbb_url = await self._join_bbb_session(page, class_name)
 
             if not bbb_url:
@@ -275,13 +236,13 @@ class LMSMain:
             logger.error(f"[{class_name}] No URL for hold session")
             return
 
-        meetings_url = _meetings_url(lesson_url)
+        logger.info(f"[{class_name}] Navigating to lesson page: {lesson_url}")
         ctx, page = await self._new_page()
         try:
             if not await self._login_page(page):
                 return
 
-            await page.goto(meetings_url, wait_until="domcontentloaded", timeout=15000)
+            await page.goto(lesson_url, wait_until="domcontentloaded", timeout=15000)
             bbb_url = await self._join_bbb_session(page, class_name)
 
             if not bbb_url:
