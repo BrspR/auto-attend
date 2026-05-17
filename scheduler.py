@@ -7,7 +7,7 @@ import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from config import CLASSES, TIMEZONE, MAX_STAY_MINUTES, FIRST_TRY_MINUTES, SECOND_TRY_MINUTES
+from config import CLASSES, TIMEZONE, MAX_STAY_MINUTES, FIRST_TRY_MINUTES, SECOND_TRY_MINUTES, THIRD_TRY_MINUTES
 from lms_main import LMSMain
 from lms_nima import LMSNima
 
@@ -64,8 +64,18 @@ async def attend_job(lms_main: LMSMain, lms_nima: LMSNima, cls: dict):
     logger.info(f"[{name}] Second attempt (T+{SECOND_TRY_MINUTES}min)...")
     success = await _attempt(lms_main, lms_nima, cls, hold_until_ts)
 
+    if success:
+        return
+
+    # Wait until T+30 and do a final retry
+    remaining_wait = (THIRD_TRY_MINUTES - SECOND_TRY_MINUTES) * 60
+    logger.info(f"[{name}] Second attempt failed. Waiting {remaining_wait//60} more min for third try...")
+    await asyncio.sleep(remaining_wait)
+    logger.info(f"[{name}] Third attempt (T+{THIRD_TRY_MINUTES}min)...")
+    success = await _attempt(lms_main, lms_nima, cls, hold_until_ts)
+
     if not success:
-        logger.warning(f"[{name}] Both attempts failed — attendance not recorded today")
+        logger.warning(f"[{name}] All 3 attempts failed — attendance not recorded today")
 
 
 def _is_class_in_progress(cls: dict) -> tuple[bool, float]:
