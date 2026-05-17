@@ -3,6 +3,7 @@ import json
 import logging
 import re
 import time
+from datetime import datetime
 from pathlib import Path
 from playwright.async_api import async_playwright, Playwright, Browser, BrowserContext, Page
 
@@ -58,7 +59,6 @@ class LMSMain:
     async def _login_page(self, page: Page) -> bool:
         await page.goto(f"{BASE_URL}/panel/home", wait_until="domcontentloaded")
 
-        # Check if already logged in (no SSO button visible)
         sso_btn = page.locator("a:has-text('ورود با سامانه یکپارچه')")
         if await sso_btn.count() == 0 and "panel" in page.url:
             logger.info("Already logged in to main LMS")
@@ -75,7 +75,6 @@ class LMSMain:
             await user_input.fill(self.username)
             await page.locator("input[type='password']").first.fill(self.password)
             await page.locator("button[type='submit'], input[type='submit']").first.click()
-            # networkidle times out on AUT dashboard (background polling) — wait for navigation instead
             await page.wait_for_load_state("domcontentloaded", timeout=20000)
             await page.wait_for_timeout(2000)
         except Exception as e:
@@ -86,12 +85,17 @@ class LMSMain:
         logger.info(f"Login {'successful' if success else 'FAILED'} — URL: {page.url}")
         return success
 
-    async def _find_attend_button(self, page: Page, class_name: str) -> bool:
+    async def _join_bbb_session(self, page: Page, class_name: str) -> str | None:
         """
-        Search paginated sessions list for the live ورود button.
-        Sessions are listed oldest→newest, so we start from the last page.
+        Fararoom session attendance flow:
+          1. Sessions page lists each session with a collapsed row
+          2. Click the '+' button next to a session row to expand it
+          3. Inside the expanded row: a blue 'لینک ورود / ورود به جلسه / BigBlueButton' link
+          4. Navigate to that link's href directly (avoids new-tab issues)
+          5. Return the BBB URL we landed on, or None if no live session found
+        Checks pages last→first so the most recent session is tried first.
         """
-        # Detect total pages
+        # Detect pagination
         page_links = await page.locator("a.page-link[href*='?page=']").all()
         max_page = 1
         for lnk in page_links:
@@ -100,39 +104,66 @@ class LMSMain:
             if m:
                 max_page = max(max_page, int(m.group(1)))
 
-        logger.info(f"[{class_name}] Sessions list has {max_page} page(s), checking last→first")
+        logger.info(f"[{class_name}] Sessions list: {max_page} page(s), scanning last→first")
 
         for pg in range(max_page, 0, -1):
             if pg != 1:
                 pg_url = page.url.split("?")[0] + f"?page={pg}"
                 await page.goto(pg_url, wait_until="domcontentloaded", timeout=15000)
+                await page.wait_for_timeout(500)
 
-            # Blue ورود button in a table cell (active session join button)
-            attend_btn = page.locator(
-                "td a:has-text('ورود'), "
-                "td button:has-text('ورود'), "
-                "a.btn-primary:has-text('ورود'), "
-                "a.btn:has-text('ورود'), "
-                "button.btn:has-text('ورود')"
-            ).first
+            # Find all + expand triggers (accordion toggles) on this page
+            expand_btns = page.locator(
+                "button:has-text('+')"
+                ", [data-toggle='collapse']"
+                ", [data-bs-toggle='collapse']"
+                ", td button"
+            )
+            btn_count = await expand_btns.count()
+            logger.info(f"[{class_name}] Page {pg}: {btn_count} session row(s) found")
 
-            count = await attend_btn.count()
-            logger.info(f"[{class_name}] Page {pg}: found {count} ورود button(s)")
+            # Try rows in reverse order (bottom = most recent session)
+            for i in range(btn_count - 1, -1, -1):
+                btn = expand_btns.nth(i)
+                try:
+                    await btn.click()
+                    await page.wait_for_timeout(800)  # let accordion expand
 
-            if count > 0:
-                await attend_btn.click()
-                await page.wait_for_load_state("domcontentloaded", timeout=10000)
-                await page.wait_for_timeout(1000)
-                logger.info(f"[{class_name}] ✓ Attendance clicked! Now at: {page.url}")
-                return True
+                    # Look for the blue BBB join link in the now-expanded content
+                    join_link = page.locator(
+                        "a:has-text('لینک ورود')"
+                        ", a:has-text('ورود به جلسه')"
+                        ", a:has-text('BigBlueButton')"
+                        ", a.btn-primary:has-text('ورود')"
+                        ", a[href*='bigbluebutton']"
+                        ", a[href*='/join']"
+                    ).first
 
-        return False
+                    if await join_link.count() > 0:
+                        bbb_href = await join_link.get_attribute("href") or ""
+                        logger.info(f"[{class_name}] BBB link found: {bbb_href[:100]}")
+
+                        # Navigate directly to BBB URL to avoid new-tab handling
+                        target = bbb_href if bbb_href.startswith("http") else f"{BASE_URL}{bbb_href}"
+                        await page.goto(target, wait_until="domcontentloaded", timeout=25000)
+                        logger.info(f"[{class_name}] ✓ Joined BBB! Now at: {page.url}")
+                        return page.url
+
+                    # No join link in this row — collapse it and try the next
+                    await btn.click()
+                    await page.wait_for_timeout(300)
+
+                except Exception as e:
+                    logger.debug(f"[{class_name}] Row {i} expand error: {e}")
+                    continue
+
+        return None
 
     async def discover_all_urls(self, classes: list[dict]) -> dict[str, str]:
         """
-        Login once, scrape the home page, and return {class_name: url} for every
-        matched class. Uses longest-keyword-wins to avoid substring collisions
-        (e.g. "نام درس" vs "نام درس"). Saves to cache.
+        Login once, scrape the home page for lesson links, match against each class
+        by keywords. Longest-keyword-wins avoids substring collisions.
+        Saves results to cache automatically.
         """
         found: dict[str, str] = {}
         ctx, page = await self._new_page()
@@ -142,10 +173,8 @@ class LMSMain:
                 return found
 
             await page.goto(f"{BASE_URL}/panel/home", wait_until="domcontentloaded", timeout=15000)
-            # Wait for the JS-rendered class list to appear
             await page.wait_for_timeout(3000)
 
-            # Dump ALL link text+href pairs to Python once — avoids stale DOM refs
             all_links: list[dict] = await page.evaluate("""
                 () => Array.from(document.querySelectorAll('a[href]')).map(a => ({
                     text: a.innerText.trim(),
@@ -163,8 +192,7 @@ class LMSMain:
                 if not href or href.startswith("#") or "javascript" in href:
                     continue
 
-                # Longest-matching keyword wins — prevents "نام درس" matching
-                # a link meant for "نام درس"
+                # Longest-matching keyword wins
                 best_name, best_kw_len = None, 0
                 for name, cls in remaining.items():
                     for kw in cls["keywords"]:
@@ -174,11 +202,9 @@ class LMSMain:
                 if best_name is None:
                     continue
 
-                # Resolve URL
                 if "/panel/myLesson/" in href:
                     url = href if href.startswith("http") else f"{BASE_URL}{href}"
                 else:
-                    # Navigate to the link and check where it lands
                     target = href if href.startswith("http") else f"{BASE_URL}{href}"
                     try:
                         await page.goto(target, wait_until="domcontentloaded", timeout=12000)
@@ -194,7 +220,6 @@ class LMSMain:
                     del remaining[best_name]
                     logger.info(f"✓ {best_name}: {url}")
 
-            # Persist all found URLs to cache
             cache = _load_cache()
             cache.update(found)
             _save_cache(cache)
@@ -207,6 +232,7 @@ class LMSMain:
             await ctx.close()
 
     async def attend_class(self, class_name: str, keywords: list[str]) -> bool:
+        """Click the BBB join button to register attendance. Returns True on success."""
         cache = _load_cache()
         lesson_url = cache.get(class_name)
         if not lesson_url:
@@ -222,12 +248,12 @@ class LMSMain:
                 return False
 
             await page.goto(meetings_url, wait_until="domcontentloaded", timeout=15000)
-            found = await self._find_attend_button(page, class_name)
+            bbb_url = await self._join_bbb_session(page, class_name)
 
-            if not found:
-                logger.warning(f"[{class_name}] No active ورود button found — session not live yet")
+            if not bbb_url:
+                logger.warning(f"[{class_name}] No live BBB session found — professor hasn't started yet")
 
-            return found
+            return bbb_url is not None
         except Exception as e:
             logger.error(f"[{class_name}] Error: {e}")
             return False
@@ -242,7 +268,7 @@ class LMSMain:
         hold_until_ts: float,
         keepalive_interval: int = 600,
     ):
-        """Attend and keep session open until hold_until_ts."""
+        """Join the BBB session and stay on the page until hold_until_ts."""
         cache = _load_cache()
         lesson_url = class_url or cache.get(class_name)
         if not lesson_url:
@@ -256,9 +282,15 @@ class LMSMain:
                 return
 
             await page.goto(meetings_url, wait_until="domcontentloaded", timeout=15000)
+            bbb_url = await self._join_bbb_session(page, class_name)
 
+            if not bbb_url:
+                logger.warning(f"[{class_name}] Could not join BBB for hold — session may not be live")
+                return
+
+            hold_end = datetime.fromtimestamp(hold_until_ts).strftime("%H:%M")
             remaining = hold_until_ts - time.time()
-            logger.info(f"[{class_name}] Holding for {remaining/60:.1f} min until {__import__('datetime').datetime.fromtimestamp(hold_until_ts).strftime('%H:%M')}")
+            logger.info(f"[{class_name}] Holding on BBB for {remaining/60:.1f} min until {hold_end}")
 
             while time.time() < hold_until_ts:
                 sleep_secs = min(keepalive_interval, hold_until_ts - time.time())
@@ -267,10 +299,10 @@ class LMSMain:
                 await asyncio.sleep(sleep_secs)
                 if time.time() < hold_until_ts:
                     try:
-                        await page.evaluate("window.scrollBy(0,1)")
-                        logger.info(f"[{class_name}] Keepalive — {(hold_until_ts - time.time())/60:.1f} min left")
+                        await page.evaluate("window.scrollBy(0, 1)")
+                        logger.info(f"[{class_name}] Keepalive on BBB — {(hold_until_ts - time.time())/60:.1f} min left")
                     except Exception:
-                        logger.warning(f"[{class_name}] Keepalive failed, stopping hold")
+                        logger.warning(f"[{class_name}] BBB keepalive failed — page may have closed")
                         break
 
             logger.info(f"[{class_name}] ✓ Hold complete")
