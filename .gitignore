@@ -16,3 +16,6 @@ scheduler.log
 nohup.out
 *.png
 .claude/
+
+# nima live-session debug dumps (auto-saved when a ورود button isn't found)
+nima_debug_*.html

@@ -12,6 +12,21 @@ CACHE_FILE = Path(__file__).parent / "cache" / "class_urls.json"
 BASE_URL = "https://lmshome.aut.ac.ir"
 
 
+def _norm(s: str) -> str:
+    """
+    Normalize Persian text for keyword matching. The LMS renders class names with
+    Arabic yeh (ي) / kaf (ك) and ZWNJ joiners (e.g. 'رياضي', 'تدريس‌يار'), while
+    config.py uses Persian yeh (ی) / kaf (ک) and plain spaces — so a raw substring
+    test fails on different Unicode codepoints. Unify them and treat ZWNJ as a space.
+    """
+    if not s:
+        return ""
+    s = s.replace("ي", "ی").replace("ك", "ک")
+    for z in ("‌", "‍", "‎", "‏"):  # ZWNJ/ZWJ + bidi marks
+        s = s.replace(z, " ")
+    return " ".join(s.split())
+
+
 def _load_cache() -> dict:
     if CACHE_FILE.exists():
         return json.loads(CACHE_FILE.read_text())
@@ -58,16 +73,16 @@ class LMSMain:
         logger.info("Logging into main LMS via SSO...")
         try:
             await sso_btn.first.click()
-            await page.wait_for_load_state("domcontentloaded", timeout=15000)
+            await page.wait_for_load_state("domcontentloaded", timeout=30000)
             logger.info(f"SSO page: {page.url}")
 
-            await page.wait_for_selector("input[type='password']", timeout=10000)
+            await page.wait_for_selector("input[type='password']", timeout=20000)
             user_input = page.locator("input[type='text'], input[name*='user'], input[id*='user']").first
             await user_input.fill(self.username)
             await page.locator("input[type='password']").first.fill(self.password)
             await page.locator("button[type='submit'], input[type='submit']").first.click()
-            await page.wait_for_load_state("domcontentloaded", timeout=20000)
-            await page.wait_for_timeout(2000)
+            await page.wait_for_load_state("domcontentloaded", timeout=40000)
+            await page.wait_for_timeout(3000)
         except Exception as e:
             logger.error(f"Login error: {e}")
             return False
@@ -134,8 +149,15 @@ class LMSMain:
                 logger.error("Cannot discover URLs — login failed")
                 return found
 
-            await page.goto(f"{BASE_URL}/panel/home", wait_until="domcontentloaded", timeout=15000)
-            await page.wait_for_timeout(3000)
+            await page.goto(f"{BASE_URL}/panel/home", wait_until="domcontentloaded", timeout=30000)
+            # Lesson links load asynchronously after domcontentloaded. Wait for them
+            # to appear instead of a fixed sleep — the home page was intermittently
+            # scraped empty (0/9), causing discover to silently find nothing.
+            try:
+                await page.wait_for_selector("a[href*='myLesson']", timeout=25000)
+            except Exception:
+                logger.warning("No lesson links appeared within 25s — home scrape may be empty")
+            await page.wait_for_timeout(1500)
 
             all_links: list[dict] = await page.evaluate("""
                 () => Array.from(document.querySelectorAll('a[href]')).map(a => ({
@@ -154,12 +176,15 @@ class LMSMain:
                 if not href or href.startswith("#") or "javascript" in href:
                     continue
 
-                # Longest-matching keyword wins
+                text_n = _norm(text)
+
+                # Longest-matching keyword wins (compared on normalized text)
                 best_name, best_kw_len = None, 0
                 for name, cls in remaining.items():
                     for kw in cls["keywords"]:
-                        if kw in text and len(kw) > best_kw_len:
-                            best_name, best_kw_len = name, len(kw)
+                        kw_n = _norm(kw)
+                        if kw_n in text_n and len(kw_n) > best_kw_len:
+                            best_name, best_kw_len = name, len(kw_n)
 
                 if best_name is None:
                     continue
@@ -208,7 +233,7 @@ class LMSMain:
             if not await self._login_page(page):
                 return False
 
-            await page.goto(lesson_url, wait_until="domcontentloaded", timeout=15000)
+            await page.goto(lesson_url, wait_until="domcontentloaded", timeout=30000)
             bbb_url = await self._join_bbb_session(page, class_name)
 
             if not bbb_url:
@@ -242,7 +267,7 @@ class LMSMain:
             if not await self._login_page(page):
                 return
 
-            await page.goto(lesson_url, wait_until="domcontentloaded", timeout=15000)
+            await page.goto(lesson_url, wait_until="domcontentloaded", timeout=30000)
             bbb_url = await self._join_bbb_session(page, class_name)
 
             if not bbb_url:

@@ -11,6 +11,17 @@ BASE_URL = "https://lms.aut.ac.ir"
 CACHE_FILE = Path(__file__).parent / "cache" / "class_urls.json"
 
 
+def _norm(s: str) -> str:
+    """Unify Arabic/Persian yeh (ي→ی) & kaf (ك→ک), turn ZWNJ into a space,
+    collapse whitespace — so keyword matching survives the LMS's mixed encoding."""
+    if not s:
+        return ""
+    s = s.replace("ي", "ی").replace("ك", "ک")
+    for z in ("‌", "‍", "‎", "‏"):  # ZWNJ/ZWJ + bidi marks
+        s = s.replace(z, " ")
+    return " ".join(s.split())
+
+
 def _load_cache() -> dict:
     if CACHE_FILE.exists():
         return json.loads(CACHE_FILE.read_text())
@@ -46,43 +57,90 @@ class LMSNima:
         page = await ctx.new_page()
         return ctx, page
 
+    async def _looks_authenticated(self, page: Page) -> bool:
+        """
+        Nima is a single-page app. When NOT logged in, /users-panel/* loads an
+        empty shell (URL still contains 'users-panel') and then redirects to
+        /login. So a URL substring is a false positive — we must check for
+        authenticated-only CONTENT. The announcements panel renders the heading
+        'اعلانات' and the schedule-table header 'وضعیت' only when logged in.
+        """
+        url = page.url.lower()
+        if "/login" in url or "courses.aut.ac.ir" in url or "accounts.aut.ac.ir" in url:
+            return False
+        # The SPA may take a few seconds to render; poll the body text for an
+        # authenticated-only marker. 'خروج' (logout) and 'اعلانات' (announcements)
+        # only appear once logged in.
+        markers = ("اعلانات", "خروج", "جلسات", "وضعیت")
+        for _ in range(10):
+            if "/login" in page.url.lower():
+                return False
+            try:
+                text = await page.locator("body").inner_text()
+            except Exception:
+                text = ""
+            if any(m in text for m in markers):
+                return True
+            await page.wait_for_timeout(1000)
+        return False
+
     async def _login_page(self, page: Page) -> bool:
         logger.info("Navigating to Nima LMS...")
-        await page.goto(f"{BASE_URL}/users-panel/announcements-list", wait_until="domcontentloaded", timeout=15000)
-        logger.info(f"Nima redirected to: {page.url}")
+        await page.goto(
+            f"{BASE_URL}/users-panel/announcements-list",
+            wait_until="domcontentloaded", timeout=30000,
+        )
+        await page.wait_for_timeout(3000)  # let the SPA settle / redirect
+        logger.info(f"Nima landed on: {page.url}")
 
-        if "users-panel" in page.url:
+        if await self._looks_authenticated(page):
             logger.info("Nima: already logged in")
             return True
 
+        # Real login: /login redirects to the Moodle login page on courses.aut.ac.ir
+        # which carries the 'ورود با سامانه یکپارچه' (unified SSO) button.
+        logger.info("Nima: not authenticated — logging in via /login → SSO")
         try:
-            sso_btn = page.locator("a:has-text('ورود با سامانه یکپارچه')")
-            if await sso_btn.count() > 0:
-                logger.info("Clicking Nima SSO button...")
-                await sso_btn.first.click()
-                await page.wait_for_load_state("domcontentloaded", timeout=15000)
-                logger.info(f"Nima CAS page: {page.url}")
-            else:
-                logger.warning(f"No SSO button found on: {page.url}")
-                return False
-
-            await page.wait_for_selector("input[type='password']", timeout=10000)
-            user_input = page.locator("input[type='text'], input[name*='user'], input[id*='user']").first
-            await user_input.fill(self.username)
-            await page.locator("input[type='password']").first.fill(self.password)
-            await page.locator("button[type='submit'], input[type='submit']").first.click()
-            await page.wait_for_load_state("domcontentloaded", timeout=20000)
+            await page.goto(f"{BASE_URL}/login", wait_until="domcontentloaded", timeout=30000)
             await page.wait_for_timeout(2000)
+
+            sso_btn = page.locator(
+                "a:has-text('ورود با سامانه یکپارچه'), "
+                "button:has-text('ورود با سامانه یکپارچه'), "
+                "a:has-text('سامانه یکپارچه')"
+            )
+            await sso_btn.first.wait_for(timeout=20000)
+            logger.info(f"Nima SSO button found on: {page.url}")
+            await sso_btn.first.click()
+            await page.wait_for_load_state("domcontentloaded", timeout=40000)
+            await page.wait_for_timeout(1500)
+
+            # CAS may prompt for credentials, or skip straight back if already SSO'd
+            if await page.locator("input[type='password']").count() > 0:
+                logger.info(f"Nima CAS login form at: {page.url}")
+                user_input = page.locator(
+                    "input[type='text'], input[name*='user'], input[id*='user']"
+                ).first
+                await user_input.fill(self.username)
+                await page.locator("input[type='password']").first.fill(self.password)
+                await page.locator("button[type='submit'], input[type='submit']").first.click()
+                await page.wait_for_load_state("domcontentloaded", timeout=40000)
+                await page.wait_for_timeout(4000)
         except Exception as e:
             logger.error(f"Nima login error: {e}")
             return False
 
-        logger.info(f"After Nima login URL: {page.url}")
-        if "users-panel" in page.url or ("lms.aut.ac.ir" in page.url and "login" not in page.url.lower()):
-            logger.info("Nima login successful")
+        # Re-verify by content, never by URL substring
+        await page.goto(
+            f"{BASE_URL}/users-panel/announcements-list",
+            wait_until="domcontentloaded", timeout=30000,
+        )
+        await page.wait_for_timeout(3000)
+        if await self._looks_authenticated(page):
+            logger.info(f"Nima login successful — URL: {page.url}")
             return True
 
-        logger.error(f"Nima login failed. URL: {page.url}")
+        logger.error(f"Nima login FAILED — URL: {page.url}")
         return False
 
     async def discover_all_urls(self, classes: list[dict]) -> dict[str, str]:
@@ -163,57 +221,120 @@ class LMSNima:
         finally:
             await ctx.close()
 
+    # Match a "join" control: any ورود link/button (the live-session join is
+    # labelled with ورود), or a direct BBB link. We deliberately do NOT fall back
+    # to a bare green button — the green PrimeNG buttons on this page are 'refresh'
+    # icon buttons. The unified-SSO button "ورود با سامانه یکپارچه" only exists on
+    # the unauthenticated Moodle page (not here, post-login), but we still drop any
+    # control whose own label contains 'سامانه' as a safety net.
+    _JOIN_SELECTOR = (
+        "a:has-text('ورود'), button:has-text('ورود'), "
+        "a[href*='bigbluebutton'], a[href*='/join'], a[href*='blue3'], a[href*='blue']"
+    )
+    _ROW_TEXT_JS = (
+        "(node) => {"
+        "  const a = node.closest('tr, li, [class*=card], [class*=row], [class*=item]');"
+        "  return a ? a.innerText : (node.parentElement ? node.parentElement.innerText : '');"
+        "}"
+    )
+
+    async def _find_join_button(self, page: Page, class_name: str, keywords: list[str]):
+        """
+        Return a locator for this class's ورود control, or None if not live.
+        Scoping is done on NORMALIZED text (Arabic/Persian yeh + ZWNJ) so it
+        survives the LMS's mixed encoding — the same bug that broke Fararoom.
+        """
+        controls = page.locator(self._JOIN_SELECTOR)
+        n = await controls.count()
+        candidates = []  # (locator, normalized enclosing-row text)
+        for i in range(n):
+            el = controls.nth(i)
+            try:
+                own = _norm(await el.inner_text())
+            except Exception:
+                own = ""
+            if "سامانه" in own:  # unified-SSO button, not a class join
+                continue
+            try:
+                row = _norm(await el.evaluate(self._ROW_TEXT_JS))
+            except Exception:
+                row = ""
+            candidates.append((el, row))
+
+        if not candidates:
+            return None
+
+        kws = [_norm(k) for k in keywords]
+        for el, row in candidates:
+            if any(k and k in row for k in kws):
+                logger.info(f"[Nima] Matched ورود control for '{class_name}' by row text")
+                return el
+
+        # No keyword match: only act if exactly one join control is live (one Nima
+        # session per time slot). Refuse to guess when several are present.
+        if len(candidates) == 1:
+            logger.info("[Nima] One ورود control present, no keyword match — using it")
+            return candidates[0][0]
+        logger.warning(f"[Nima] {len(candidates)} ورود controls, none matched '{class_name}' — refusing to guess")
+        return None
+
+    async def _dump_debug(self, page: Page, class_name: str):
+        """Save HTML + screenshot so a real live session can be inspected later."""
+        try:
+            safe = class_name.replace(" ", "_").replace("/", "_")[:30]
+            html_path = Path(__file__).parent / f"nima_debug_{safe}.html"
+            png_path = Path(__file__).parent / f"nima_debug_{safe}.png"
+            html_path.write_text(await page.content(), encoding="utf-8")
+            await page.screenshot(path=str(png_path), full_page=True)
+            logger.info(f"[Nima] Saved debug dump: {html_path.name} / {png_path.name}")
+        except Exception as e:
+            logger.warning(f"[Nima] debug dump failed: {e}")
+
+    async def _open_session(self, page: Page, class_name: str, keywords: list[str]):
+        """
+        Go to the front page (announcements-list shows جلسات فعلی), find this
+        class's ورود button and click it. Returns the page to stay on (which may
+        be a new tab if ورود opens BBB in a popup), or None if not joinable.
+        """
+        await page.goto(
+            f"{BASE_URL}/users-panel/announcements-list",
+            wait_until="domcontentloaded", timeout=30000,
+        )
+        await page.wait_for_timeout(4000)  # let جلسات فعلی render
+
+        btn = await self._find_join_button(page, class_name, keywords)
+        if btn is None:
+            return None
+
+        pages_before = len(page.context.pages)
+        await btn.click()
+        await page.wait_for_timeout(3000)
+
+        if len(page.context.pages) > pages_before:
+            new_page = page.context.pages[-1]
+            try:
+                await new_page.wait_for_load_state("domcontentloaded", timeout=20000)
+            except Exception:
+                pass
+            logger.info(f"[Nima] ✓ '{class_name}' opened in new tab — URL: {new_page.url}")
+            return new_page
+
+        logger.info(f"[Nima] ✓ '{class_name}' ورود clicked — URL: {page.url}")
+        return page
+
     async def attend_class(self, class_name: str, keywords: list[str]) -> bool:
-        """
-        Find the active session for this class on the announcements page and click ورود.
-        Looks for a join button inside a section that also contains a keyword match
-        so it doesn't click the wrong class's button.
-        """
+        """Log in, open the front page, click this class's green ورود button."""
         logger.info(f"[Nima] Attending '{class_name}'")
         ctx, page = await self._new_page()
         try:
             if not await self._login_page(page):
                 return False
 
-            # First check if there's a cached per-class URL
-            cache = _load_cache()
-            class_url = cache.get(class_name)
-            if class_url:
-                logger.info(f"[Nima] Using cached URL: {class_url}")
-                await page.goto(class_url, wait_until="domcontentloaded", timeout=12000)
-                await page.wait_for_timeout(1000)
-            else:
-                await page.goto(f"{BASE_URL}/users-panel/announcements-list", wait_until="domcontentloaded")
-                await page.wait_for_timeout(2000)
-
-            # Try keyword-scoped join button first (correct class section)
-            join_btn = None
-            for kw in keywords:
-                scoped = page.locator(f"*:has-text('{kw}')").filter(
-                    has=page.locator("a:has-text('ورود'), button:has-text('ورود')")
-                ).last
-                if await scoped.count() > 0:
-                    join_btn = scoped.locator("a:has-text('ورود'), button:has-text('ورود')").first
-                    logger.info(f"[Nima] Found scoped ورود button near '{kw}'")
-                    break
-
-            # Fall back to any ورود / شرکت / Join button on the page
-            if join_btn is None or await join_btn.count() == 0:
-                logger.warning(f"[Nima] No keyword-scoped button, trying any join button")
-                join_btn = page.locator(
-                    "a:has-text('ورود'), button:has-text('ورود'), "
-                    "a:has-text('شرکت'), a:has-text('Join')"
-                ).first
-
-            if await join_btn.count() == 0:
-                logger.warning(f"[Nima] No join button found — session not live yet")
-                logger.debug(f"[Nima] Page snippet: {(await page.content())[:800]}")
+            session_page = await self._open_session(page, class_name, keywords)
+            if session_page is None:
+                logger.warning(f"[Nima] No live ورود button for '{class_name}' — session not started yet")
+                await self._dump_debug(page, class_name)
                 return False
-
-            await join_btn.click()
-            await page.wait_for_load_state("domcontentloaded", timeout=10000)
-            await page.wait_for_timeout(1000)
-            logger.info(f"[Nima] ✓ Joined '{class_name}'! URL: {page.url}")
             return True
         except Exception as e:
             logger.error(f"[Nima] Error: {e}")
@@ -233,9 +354,10 @@ class LMSNima:
             if not await self._login_page(page):
                 return
 
-            cache = _load_cache()
-            target_url = cache.get(class_name, f"{BASE_URL}/users-panel/announcements-list")
-            await page.goto(target_url, wait_until="domcontentloaded")
+            # Re-join and stay on the resulting page (BBB tab if it popped one,
+            # otherwise the front page) to keep the session alive.
+            session_page = await self._open_session(page, class_name, keywords)
+            hold_page = session_page or page
 
             remaining = hold_until_ts - time.time()
             logger.info(f"[Nima/{class_name}] Holding for {remaining/60:.1f} more minutes...")
@@ -244,7 +366,7 @@ class LMSNima:
                 await asyncio.sleep(min(keepalive_interval, hold_until_ts - time.time()))
                 if time.time() < hold_until_ts:
                     try:
-                        await page.evaluate("window.scrollBy(0,1)")
+                        await hold_page.evaluate("window.scrollBy(0,1)")
                         logger.info(f"[Nima/{class_name}] Keepalive ({(hold_until_ts - time.time())/60:.1f} min left)")
                     except Exception:
                         logger.warning(f"[Nima/{class_name}] Keepalive failed")
