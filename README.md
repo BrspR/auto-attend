@@ -5,7 +5,7 @@ Automatically logs into AUT's LMS, finds your live class session, clicks the att
 **How it works:**
 - Fires at each class's scheduled start time
 - Waits **T+5 min**, then logs in and clicks `ورود`
-- If the session isn't live yet, retries at **T+15 min**
+- If it fails (session not live yet, slow network, login hiccup) it **retries every minute** until it works or the class ends — and each retry waits **1.5× longer** for pages to load (capped at 4×), so a slow/unstable connection eventually gets through
 - Holds the session open until the class ends (max 1h 45m)
 
 ---
@@ -159,6 +159,74 @@ Run in the background (survives closing the window):
 ```powershell
 Start-Process python -ArgumentList "main.py" -WindowStyle Minimized
 ```
+
+---
+
+## Run 24/7 on a server (recommended)
+
+So you don't have to keep your own computer on. Any always-on Linux box that can
+reach AUT works (an Iranian VPS is ideal).
+
+**Heads-up:** three files are **gitignored** (private), so `git clone` alone is not
+enough — copy them to the server too:
+`.env` (credentials), `config.py` (your schedule), and `cache/class_urls.json`
+(or just run `python main.py --discover` on the server after copying `config.py`).
+
+```bash
+# on the server
+git clone https://github.com/YOUR_USERNAME/auto-attend.git && cd auto-attend
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+playwright install --with-deps chromium     # --with-deps installs Chromium's OS libs (needs sudo)
+
+# copy your private files FROM your computer:
+#   scp .env config.py  user@server:~/auto-attend/
+#   scp cache/class_urls.json  user@server:~/auto-attend/cache/
+
+python main.py --test-login                 # expect both "SUCCESS"
+```
+
+### Simple: keep it running with `tmux`
+
+```bash
+tmux new -s attend                          # open a detachable session
+source .venv/bin/activate && python main.py
+# press Ctrl+B then D to detach — it keeps running after you log out
+tmux attach -t attend                       # reattach later to watch logs
+```
+
+### Robust: run as a systemd service (auto-restarts, survives reboot)
+
+Create `/etc/systemd/system/auto-attend.service` (replace `YOURUSER`):
+
+```ini
+[Unit]
+Description=AUT Auto-Attendance Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=YOURUSER
+WorkingDirectory=/home/YOURUSER/auto-attend
+Environment=TZ=Asia/Tehran
+ExecStart=/home/YOURUSER/auto-attend/.venv/bin/python main.py
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now auto-attend     # start now + on every boot
+journalctl -u auto-attend -f                # watch live logs
+```
+
+The schedule is locked to `Asia/Tehran` in code, so classes fire at the right time
+regardless of the server's clock. After updating code with `git pull`, restart with
+`sudo systemctl restart auto-attend` (your `config.py`/`.env`/cache are untouched).
 
 ---
 

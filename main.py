@@ -125,13 +125,14 @@ def cmd_dry_run():
     for cls in today_classes:
         in_progress, elapsed = _is_class_in_progress(cls)
         status = f"IN PROGRESS ({elapsed/60:.0f} min elapsed)" if in_progress else "not started / ended"
+        from config import FIRST_TRY_MINUTES, RETRY_INTERVAL_MINUTES
         logger.info(
             f"  {cls['name']}\n"
             f"    Time: {cls['start']} – {cls['end']}\n"
             f"    LMS:  {cls['lms']}\n"
             f"    Status: {status}\n"
-            f"    Would attend at: T+5 ({cls['start'].split(':')[0]}:{int(cls['start'].split(':')[1])+5:02d}) "
-            f"and retry at T+15\n"
+            f"    First attempt at T+{FIRST_TRY_MINUTES} min, then retries every "
+            f"{RETRY_INTERVAL_MINUTES} min until it works or the class ends\n"
         )
 
 

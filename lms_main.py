@@ -44,6 +44,11 @@ class LMSMain:
         self.password = password
         self._pw: Playwright | None = None
         self._browser: Browser | None = None
+        self.timeout_scale = 1.0  # bumped by the scheduler on each failed retry
+
+    def _t(self, ms: int) -> int:
+        """Scale a timeout (ms) by the current retry multiplier."""
+        return int(ms * self.timeout_scale)
 
     async def start(self):
         self._pw = await async_playwright().start()
@@ -60,6 +65,9 @@ class LMSMain:
     async def _new_page(self) -> tuple[BrowserContext, Page]:
         ctx = await self._browser.new_context(locale="fa-IR")
         page = await ctx.new_page()
+        # Scaled defaults so even calls without an explicit timeout grow on retries
+        page.set_default_timeout(self._t(30000))
+        page.set_default_navigation_timeout(self._t(40000))
         return ctx, page
 
     async def _login_page(self, page: Page) -> bool:
@@ -73,16 +81,16 @@ class LMSMain:
         logger.info("Logging into main LMS via SSO...")
         try:
             await sso_btn.first.click()
-            await page.wait_for_load_state("domcontentloaded", timeout=30000)
+            await page.wait_for_load_state("domcontentloaded", timeout=self._t(30000))
             logger.info(f"SSO page: {page.url}")
 
-            await page.wait_for_selector("input[type='password']", timeout=20000)
+            await page.wait_for_selector("input[type='password']", timeout=self._t(20000))
             user_input = page.locator("input[type='text'], input[name*='user'], input[id*='user']").first
             await user_input.fill(self.username)
             await page.locator("input[type='password']").first.fill(self.password)
             await page.locator("button[type='submit'], input[type='submit']").first.click()
-            await page.wait_for_load_state("domcontentloaded", timeout=40000)
-            await page.wait_for_timeout(3000)
+            await page.wait_for_load_state("domcontentloaded", timeout=self._t(40000))
+            await page.wait_for_timeout(self._t(3000))
         except Exception as e:
             logger.error(f"Login error: {e}")
             return False
@@ -233,7 +241,7 @@ class LMSMain:
             if not await self._login_page(page):
                 return False
 
-            await page.goto(lesson_url, wait_until="domcontentloaded", timeout=30000)
+            await page.goto(lesson_url, wait_until="domcontentloaded", timeout=self._t(30000))
             bbb_url = await self._join_bbb_session(page, class_name)
 
             if not bbb_url:
@@ -267,7 +275,7 @@ class LMSMain:
             if not await self._login_page(page):
                 return
 
-            await page.goto(lesson_url, wait_until="domcontentloaded", timeout=30000)
+            await page.goto(lesson_url, wait_until="domcontentloaded", timeout=self._t(30000))
             bbb_url = await self._join_bbb_session(page, class_name)
 
             if not bbb_url:

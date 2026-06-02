@@ -2,10 +2,11 @@ import pytz
 
 TIMEZONE = pytz.timezone("Asia/Tehran")
 
-MAX_STAY_MINUTES = 105      # max time to stay in class (1h 45m)
-FIRST_TRY_MINUTES = 5       # try attendance at T+5
-SECOND_TRY_MINUTES = 15     # retry at T+15 if first failed
-THIRD_TRY_MINUTES = 30      # final retry at T+30 if second also failed
+MAX_STAY_MINUTES = 105       # max time to stay in class (1h 45m)
+FIRST_TRY_MINUTES = 5        # wait this long after class start before the first attempt
+RETRY_INTERVAL_MINUTES = 1   # if an attempt fails, retry every this-many minutes until success/class end
+TIMEOUT_GROWTH = 1.5         # multiply page timeouts by this after each failed attempt
+MAX_TIMEOUT_SCALE = 4.0      # cap on timeout growth (4x ≈ up to ~2 min) so it never balloons
 
 LMS_MAIN_URL = "https://lmshome.aut.ac.ir"
 LMS_NIMA_URL = "https://lms.aut.ac.ir"

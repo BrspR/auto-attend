@@ -39,6 +39,11 @@ class LMSNima:
         self.password = password
         self._pw: Playwright | None = None
         self._browser: Browser | None = None
+        self.timeout_scale = 1.0  # bumped by the scheduler on each failed retry
+
+    def _t(self, ms: int) -> int:
+        """Scale a timeout (ms) by the current retry multiplier."""
+        return int(ms * self.timeout_scale)
 
     async def start(self):
         self._pw = await async_playwright().start()
@@ -55,6 +60,9 @@ class LMSNima:
     async def _new_page(self) -> tuple[BrowserContext, Page]:
         ctx = await self._browser.new_context(locale="fa-IR")
         page = await ctx.new_page()
+        # Scaled defaults so even calls without an explicit timeout grow on retries
+        page.set_default_timeout(self._t(30000))
+        page.set_default_navigation_timeout(self._t(40000))
         return ctx, page
 
     async def _looks_authenticated(self, page: Page) -> bool:
@@ -88,9 +96,9 @@ class LMSNima:
         logger.info("Navigating to Nima LMS...")
         await page.goto(
             f"{BASE_URL}/users-panel/announcements-list",
-            wait_until="domcontentloaded", timeout=30000,
+            wait_until="domcontentloaded", timeout=self._t(30000),
         )
-        await page.wait_for_timeout(3000)  # let the SPA settle / redirect
+        await page.wait_for_timeout(self._t(3000))  # let the SPA settle / redirect
         logger.info(f"Nima landed on: {page.url}")
 
         if await self._looks_authenticated(page):
@@ -101,19 +109,19 @@ class LMSNima:
         # which carries the 'ورود با سامانه یکپارچه' (unified SSO) button.
         logger.info("Nima: not authenticated — logging in via /login → SSO")
         try:
-            await page.goto(f"{BASE_URL}/login", wait_until="domcontentloaded", timeout=30000)
-            await page.wait_for_timeout(2000)
+            await page.goto(f"{BASE_URL}/login", wait_until="domcontentloaded", timeout=self._t(30000))
+            await page.wait_for_timeout(self._t(2000))
 
             sso_btn = page.locator(
                 "a:has-text('ورود با سامانه یکپارچه'), "
                 "button:has-text('ورود با سامانه یکپارچه'), "
                 "a:has-text('سامانه یکپارچه')"
             )
-            await sso_btn.first.wait_for(timeout=20000)
+            await sso_btn.first.wait_for(timeout=self._t(20000))
             logger.info(f"Nima SSO button found on: {page.url}")
             await sso_btn.first.click()
-            await page.wait_for_load_state("domcontentloaded", timeout=40000)
-            await page.wait_for_timeout(1500)
+            await page.wait_for_load_state("domcontentloaded", timeout=self._t(40000))
+            await page.wait_for_timeout(self._t(1500))
 
             # CAS may prompt for credentials, or skip straight back if already SSO'd
             if await page.locator("input[type='password']").count() > 0:
@@ -124,8 +132,8 @@ class LMSNima:
                 await user_input.fill(self.username)
                 await page.locator("input[type='password']").first.fill(self.password)
                 await page.locator("button[type='submit'], input[type='submit']").first.click()
-                await page.wait_for_load_state("domcontentloaded", timeout=40000)
-                await page.wait_for_timeout(4000)
+                await page.wait_for_load_state("domcontentloaded", timeout=self._t(40000))
+                await page.wait_for_timeout(self._t(4000))
         except Exception as e:
             logger.error(f"Nima login error: {e}")
             return False
@@ -133,9 +141,9 @@ class LMSNima:
         # Re-verify by content, never by URL substring
         await page.goto(
             f"{BASE_URL}/users-panel/announcements-list",
-            wait_until="domcontentloaded", timeout=30000,
+            wait_until="domcontentloaded", timeout=self._t(30000),
         )
-        await page.wait_for_timeout(3000)
+        await page.wait_for_timeout(self._t(3000))
         if await self._looks_authenticated(page):
             logger.info(f"Nima login successful — URL: {page.url}")
             return True
@@ -298,9 +306,9 @@ class LMSNima:
         """
         await page.goto(
             f"{BASE_URL}/users-panel/announcements-list",
-            wait_until="domcontentloaded", timeout=30000,
+            wait_until="domcontentloaded", timeout=self._t(30000),
         )
-        await page.wait_for_timeout(4000)  # let جلسات فعلی render
+        await page.wait_for_timeout(self._t(4000))  # let جلسات فعلی render
 
         btn = await self._find_join_button(page, class_name, keywords)
         if btn is None:
@@ -308,12 +316,12 @@ class LMSNima:
 
         pages_before = len(page.context.pages)
         await btn.click()
-        await page.wait_for_timeout(3000)
+        await page.wait_for_timeout(self._t(3000))
 
         if len(page.context.pages) > pages_before:
             new_page = page.context.pages[-1]
             try:
-                await new_page.wait_for_load_state("domcontentloaded", timeout=20000)
+                await new_page.wait_for_load_state("domcontentloaded", timeout=self._t(20000))
             except Exception:
                 pass
             logger.info(f"[Nima] ✓ '{class_name}' opened in new tab — URL: {new_page.url}")
