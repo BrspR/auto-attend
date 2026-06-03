@@ -187,6 +187,33 @@ Start-Process python -ArgumentList "main.py" -WindowStyle Minimized
 
 ---
 
+## Multi-user mode (`--serve`) — run it for a few friends
+
+A single supervisor onboards a small, invite-gated group and runs one worker per
+person (their own login, own browser-on-demand, own private Bale messages).
+
+```bash
+python main.py --gen-invites 15      # print 15 invite tokens; hand one to each friend
+python main.py --serve               # run the supervisor (workers + onboarding bot)
+```
+
+A friend activates by DMing the bot:  `/start <token>` → it asks for their LMS
+username, then password (the password message is deleted after it's checked), logs
+in to verify, and starts taking their attendance automatically — no schedule needed.
+Their commands: `/status`, `/stop`, `/start` (resume).
+
+**Storage & honesty:** passwords are encrypted at rest (`users.json` + a `600`
+`.users_key`, both gitignored). The key sits on the same box, so this protects a
+leaked file, **not** a full server compromise. You are the custodian of everyone's
+LMS login — only invite people who understand that, and note that many accounts
+logging in from one server IP is detectable by the university.
+
+> Status: the per-user live-session detection and the in-room BBB actions are
+> **pending verification on a real live class** — the `bbb_debug_*` dumps capture
+> the real page the first time, to confirm selectors.
+
+---
+
 ## Run 24/7 on a server (recommended)
 
 So you don't have to keep your own computer on. Any always-on Linux box that can

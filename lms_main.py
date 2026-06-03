@@ -228,10 +228,60 @@ class LMSMain:
         finally:
             await ctx.close()
 
-    async def attend_class(self, class_name: str, keywords: list[str]) -> bool:
+    async def list_all_lessons(self) -> list[dict]:
+        """Return [{name, url}] for every enrolled lesson — no keyword matching.
+        Used by multi-user workers that don't have a preset class list."""
+        out: list[dict] = []
+        ctx, page = await self._new_page()
+        try:
+            if not await self._login_page(page):
+                return out
+            await page.goto(f"{BASE_URL}/panel/home", wait_until="domcontentloaded", timeout=self._t(30000))
+            try:
+                await page.wait_for_selector("a[href*='myLesson']", timeout=self._t(25000))
+            except Exception:
+                pass
+            await page.wait_for_timeout(1500)
+            links = await page.evaluate("""
+                () => Array.from(document.querySelectorAll("a[href*='myLesson']")).map(a => ({
+                    name: (a.innerText||'').trim().replace(/\\s+/g,' '),
+                    href: a.getAttribute('href') || ''
+                }))
+            """)
+            seen = set()
+            for l in links:
+                href = l["href"]
+                url = href if href.startswith("http") else f"{BASE_URL}{href}"
+                if url in seen:
+                    continue
+                seen.add(url)
+                out.append({"name": l["name"] or url, "url": url})
+            return out
+        finally:
+            await ctx.close()
+
+    async def check_live(self, lesson_url: str) -> bool:
+        """True if this lesson currently has a live BBB join button (no click)."""
+        ctx, page = await self._new_page()
+        try:
+            if not await self._login_page(page):
+                return False
+            await page.goto(lesson_url, wait_until="domcontentloaded", timeout=self._t(30000))
+            await page.wait_for_timeout(1500)
+            btn = page.locator(
+                "a:has-text('ورود به جلسه'), a:has-text('بیگبلوباتن'), "
+                "a.btn-success, a[href*='blue3'], a[href*='bigbluebutton'], form[action*='/join']"
+            )
+            return await btn.count() > 0
+        except Exception:
+            return False
+        finally:
+            await ctx.close()
+
+    async def attend_class(self, class_name: str, keywords: list[str], lesson_url: str | None = None) -> bool:
         """Click the BBB join button to register attendance. Returns True on success."""
         cache = _load_cache()
-        lesson_url = cache.get(class_name)
+        lesson_url = lesson_url or cache.get(class_name)
         if not lesson_url:
             logger.error(f"[{class_name}] No URL in cache — run --discover first")
             return False

@@ -193,6 +193,7 @@ async def main():
     parser.add_argument("--notify-test", action="store_true", help="Send a test Bale notification and print your chat_id")
     parser.add_argument("--bot-setup", action="store_true", help="Set the bot's command menu + description on Bale")
     parser.add_argument("--gen-invites", type=int, metavar="N", help="Generate N invite tokens to hand to friends")
+    parser.add_argument("--serve", action="store_true", help="Multi-user mode: onboard friends by invite + run a worker per user")
     args = parser.parse_args()
 
     if args.dry_run:
@@ -209,6 +210,14 @@ async def main():
 
     if args.gen_invites:
         cmd_gen_invites(args.gen_invites)
+        return
+
+    if args.serve:
+        logger.info("=" * 60)
+        logger.info("AUT Auto-Attendance — MULTI-USER mode")
+        logger.info("=" * 60)
+        from supervisor import run_supervisor
+        await run_supervisor()
         return
 
     username, password = get_credentials()

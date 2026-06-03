@@ -14,6 +14,7 @@ If BALE_BOT_TOKEN is unset, every call is a silent no-op, so the bot runs fine
 without notifications configured.
 """
 import asyncio
+import contextvars
 import json
 import logging
 import os
@@ -25,6 +26,16 @@ logger = logging.getLogger(__name__)
 
 BALE_API = "https://tapi.bale.ai"
 
+# Per-task default chat: a user-worker binds its own chat_id so every notify call
+# inside that task (and its sub-tasks) routes to that user — no need to thread
+# chat_id through attend/bbb. Single-user code never binds it → falls back to env.
+_chat_ctx: contextvars.ContextVar = contextvars.ContextVar("bale_chat_id", default=None)
+
+
+def bind_chat(chat_id):
+    """Route all notify calls in the current task (and subtasks) to this chat_id."""
+    _chat_ctx.set(str(chat_id) if chat_id is not None else None)
+
 
 def _token() -> str:
     return os.getenv("BALE_BOT_TOKEN", "").strip()
@@ -33,6 +44,9 @@ def _token() -> str:
 def _resolve_chat_id(chat_id) -> str | None:
     if chat_id:
         return str(chat_id)
+    bound = _chat_ctx.get()
+    if bound:
+        return bound
     env = os.getenv("BALE_CHAT_ID", "").strip()
     return env or discover_chat_id()
 
@@ -98,6 +112,17 @@ def get_updates(offset: int | None = None, timeout: int = 0) -> list:
     except Exception as e:
         logger.warning(f"[notify] getUpdates failed: {e}")
         return []
+
+
+def delete_message(chat_id, message_id) -> bool:
+    """Best-effort delete (used to wipe a password message after onboarding)."""
+    if not _token():
+        return False
+    try:
+        res = _api("deleteMessage", {"chat_id": str(chat_id), "message_id": str(message_id)})
+        return bool(res.get("ok"))
+    except Exception:
+        return False
 
 
 def send(text: str, chat_id=None) -> bool:
