@@ -14,6 +14,8 @@ from config import (
 from lms_main import LMSMain
 from lms_nima import LMSNima
 import notify
+import state
+import commands
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +35,7 @@ async def _attempt(lms_main: LMSMain, lms_nima: LMSNima, cls: dict, hold_until_t
 
     if success:
         now_hm = datetime.now(tz=TIMEZONE).strftime("%H:%M")
+        state.set_status(name, "attended", now_hm)
         logger.info(f"[{name}] Attendance confirmed — holding until {datetime.fromtimestamp(hold_until_ts, tz=TIMEZONE).strftime('%H:%M')}")
         asyncio.create_task(notify.send_async(f"✅ حاضری ثبت شد: {name} ({now_hm})"))
         if lms_type == "nima":
@@ -60,6 +63,7 @@ async def attend_job(lms_main: LMSMain, lms_nima: LMSNima, cls: dict,
     hold_until = min(class_end, max_hold_until)
     hold_until_ts = hold_until.timestamp()
 
+    state.set_status(name, "pending")
     if initial_wait_minutes > 0:
         logger.info(f"[{name}] Class job triggered at {now.strftime('%H:%M:%S')} — first attempt in {initial_wait_minutes} min")
         await asyncio.sleep(initial_wait_minutes * 60)
@@ -75,14 +79,51 @@ async def attend_job(lms_main: LMSMain, lms_nima: LMSNima, cls: dict,
             return
 
         if datetime.now(tz=TIMEZONE) >= class_end:
+            state.set_status(name, "failed", f"{attempt} tries")
             logger.warning(f"[{name}] Class ended — gave up after {attempt} failed attempt(s)")
-            asyncio.create_task(notify.send_async(f"❌ حاضری ثبت نشد: {name} — بعد از {attempt} تلاش"))
+            asyncio.create_task(notify.send_async(f"❌ حاضری ثبت نشد: {name} — بعد از {attempt} تلاش (استاد جلسه رو شروع نکرد؟)"))
             return
 
         scale = min(scale * TIMEOUT_GROWTH, MAX_TIMEOUT_SCALE)
         logger.info(f"[{name}] Attempt #{attempt} failed — retrying in {RETRY_INTERVAL_MINUTES} min "
                     f"(next timeout x{scale:.2f})")
         await asyncio.sleep(RETRY_INTERVAL_MINUTES * 60)
+
+
+async def morning_plan():
+    """Reset today's status and send the day's class plan."""
+    state.reset_day()
+    text = commands.build_today()
+    logger.info("[summary] morning plan sent")
+    await notify.send_async(text)
+
+
+async def evening_summary_job():
+    text = commands.evening_summary()
+    if text:
+        logger.info("[summary] evening summary sent")
+        await notify.send_async(text)
+
+
+async def _startup_login_health(lms_main: LMSMain, lms_nima: LMSNima):
+    """Quick login probe at startup — alert if credentials are broken."""
+    try:
+        ctx, page = await lms_main._new_page()
+        ok_main = await lms_main._login_page(page)
+        await ctx.close()
+    except Exception:
+        ok_main = False
+    try:
+        ctx, page = await lms_nima._new_page()
+        ok_nima = await lms_nima._login_page(page)
+        await ctx.close()
+    except Exception:
+        ok_nima = False
+    if not ok_main or not ok_nima:
+        broken = ", ".join(n for n, ok in (("فراروم", ok_main), ("نیما", ok_nima)) if not ok)
+        await notify.send_async(f"⚠️ ورود ناموفق به {broken} — یوزر/رمز را در .env چک کن")
+    else:
+        logger.info("[health] startup login check: both OK")
 
 
 def _is_class_in_progress(cls: dict) -> tuple[bool, float]:
@@ -123,6 +164,16 @@ async def run_scheduler(username: str, password: str):
             misfire_grace_time=60,
         )
         logger.info(f"Scheduled '{cls['name']}' on [{days_str}] at {cls['start']}")
+
+    # Daily summaries
+    scheduler.add_job(morning_plan, CronTrigger(hour=7, minute=0, timezone=TIMEZONE),
+                      id="__morning_plan", misfire_grace_time=3600)
+    scheduler.add_job(evening_summary_job, CronTrigger(hour=22, minute=0, timezone=TIMEZONE),
+                      id="__evening_summary", misfire_grace_time=3600)
+
+    # Two-way command bot (/status, /today, /log) + startup login health check
+    asyncio.create_task(commands.run_poller())
+    asyncio.create_task(_startup_login_health(lms_main, lms_nima))
 
     # On startup: if any class is already in progress, start attempting immediately
     # (no initial wait) — the retry loop handles "session not live yet".

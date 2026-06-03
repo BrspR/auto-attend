@@ -83,6 +83,13 @@ Iran server, so this uses **Bale**:
 
 Leave `BALE_BOT_TOKEN` blank and notifications are simply skipped (no errors).
 
+**You get pinged on:** attendance confirmed ✅ / failed ❌, bot start 🟢, polls auto-answered 🗳️, خسته نباشید sent 💬, a join screenshot 📸, plus a **morning plan** and **evening summary**.
+
+**Two-way commands** — DM the bot:
+- `/status` — is it running + your next class
+- `/today` — today's classes and which are done
+- `/log` — the last few log lines
+
 ---
 
 ## Configure your classes — `config.py`

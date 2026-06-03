@@ -19,6 +19,8 @@ import random
 import time
 from pathlib import Path
 
+import notify
+
 logger = logging.getLogger(__name__)
 
 KHASTE_TEXT = "خسته نباشید"          # plain, no emoji, by request
@@ -109,6 +111,7 @@ async def answer_poll_if_present(page, label: str, answered: set, dumped_flag: d
         await options.first.click()
         answered.add(fingerprint)
         logger.info(f"[BBB/{label}] ✓ Answered poll (option A)")
+        await notify.send_async(f"🗳️ به نظرسنجی «{label}» جواب داده شد (گزینه A)")
         return True
     except Exception as e:
         logger.warning(f"[BBB/{label}] poll click failed: {e}")
@@ -150,6 +153,14 @@ async def hold_with_presence(page, label: str, hold_until_ts: float, *, send_kha
     await _dump(page, label, "inroom")
     dumped["room"] = True
 
+    # Proof screenshot to Bale (best-effort).
+    try:
+        shot = Path(__file__).parent / f"bbb_shot_{label.replace(' ', '_').replace('/', '_')[:20]}.png"
+        await page.screenshot(path=str(shot))
+        await notify.send_photo_async(str(shot), caption=f"📸 وارد کلاس شد: {label}")
+    except Exception as e:
+        logger.warning(f"[BBB/{label}] proof screenshot failed: {e}")
+
     remaining = hold_until_ts - time.time()
     logger.info(f"[BBB/{label}] Presence hold for {remaining/60:.1f} min (poll-watch on, khaste at end)")
 
@@ -161,6 +172,8 @@ async def hold_with_presence(page, label: str, hold_until_ts: float, *, send_kha
 
         if send_khaste and not khaste_sent and time.time() >= khaste_target:
             khaste_sent = await send_chat(page, label, KHASTE_TEXT)
+            if khaste_sent:
+                await notify.send_async(f"💬 «خسته نباشید» در «{label}» ارسال شد")
 
         sleep_for = min(POLL_CHECK_SECS, max(1.0, hold_until_ts - time.time()))
         await asyncio.sleep(sleep_for)
