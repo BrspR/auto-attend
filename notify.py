@@ -64,6 +64,27 @@ def discover_chat_id() -> str | None:
     return None
 
 
+def set_bot_profile(commands=None, description=None, short_description=None) -> dict:
+    """Set the bot's command menu + description. Each call is isolated because
+    Bale doesn't implement all of these (returns 501) — partial support is fine."""
+    if not _token():
+        return {}
+    out = {}
+    calls = [
+        ("commands", "setMyCommands", {"commands": json.dumps(commands)} if commands is not None else None),
+        ("description", "setMyDescription", {"description": description} if description is not None else None),
+        ("short_description", "setMyShortDescription", {"short_description": short_description} if short_description is not None else None),
+    ]
+    for key, method, params in calls:
+        if params is None:
+            continue
+        try:
+            out[key] = _api(method, params)
+        except Exception as e:
+            out[key] = f"unsupported ({e})"
+    return out
+
+
 def get_updates(offset: int | None = None, timeout: int = 0) -> list:
     """Return raw update objects (for the command poller)."""
     params: dict = {}

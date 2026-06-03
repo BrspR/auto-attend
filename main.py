@@ -123,6 +123,41 @@ def cmd_notify_test():
     logger.info("Test notification SENT ✓" if ok else "Test notification FAILED — check token/chat_id")
 
 
+BOT_COMMANDS = [
+    {"command": "start", "description": "فعال‌سازی با کد دعوت"},
+    {"command": "status", "description": "وضعیت ربات و کلاس بعدی"},
+    {"command": "today", "description": "کلاس‌های امروز"},
+    {"command": "log", "description": "آخرین لاگ‌ها"},
+    {"command": "stop", "description": "توقف حاضری برای من"},
+]
+BOT_DESCRIPTION = (
+    "ربات حاضری خودکار دانشگاه. با کد دعوت فعالش کن، یوزر و رمز سامانه LMS رو بده، "
+    "بعدش خودکار سر هر کلاس برات حاضری می‌زنه و خبرت می‌کنه."
+)
+BOT_SHORT = "حاضری خودکار کلاس‌های LMS با اعلان در بله."
+
+
+def cmd_bot_setup():
+    import notify
+    if not notify._token():
+        logger.error("BALE_BOT_TOKEN not set — add it to .env first")
+        return
+    res = notify.set_bot_profile(BOT_COMMANDS, BOT_DESCRIPTION, BOT_SHORT)
+    for k, v in res.items():
+        ok = isinstance(v, dict) and v.get("ok")
+        logger.info(f"  {k}: {'OK' if ok else v}")
+    logger.info("Bot profile updated.")
+
+
+def cmd_gen_invites(n: int):
+    import users
+    tokens = users.gen_invites(n)
+    logger.info(f"Generated {n} invite token(s) — give one to each friend:")
+    for t in tokens:
+        logger.info(f"  {t}")
+    logger.info("They activate by sending the bot:  /start <token>")
+
+
 def cmd_dry_run():
     from config import CLASSES, TIMEZONE
     from scheduler import _is_class_in_progress
@@ -156,6 +191,8 @@ async def main():
     parser.add_argument("--discover", action="store_true", help="Discover and cache class URLs")
     parser.add_argument("--dry-run", action="store_true", help="Show today's schedule without attending")
     parser.add_argument("--notify-test", action="store_true", help="Send a test Bale notification and print your chat_id")
+    parser.add_argument("--bot-setup", action="store_true", help="Set the bot's command menu + description on Bale")
+    parser.add_argument("--gen-invites", type=int, metavar="N", help="Generate N invite tokens to hand to friends")
     args = parser.parse_args()
 
     if args.dry_run:
@@ -164,6 +201,14 @@ async def main():
 
     if args.notify_test:
         cmd_notify_test()
+        return
+
+    if args.bot_setup:
+        cmd_bot_setup()
+        return
+
+    if args.gen_invites:
+        cmd_gen_invites(args.gen_invites)
         return
 
     username, password = get_credentials()

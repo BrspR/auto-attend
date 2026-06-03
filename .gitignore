@@ -2,6 +2,10 @@
 .env
 config.py
 
+# multi-user store + encryption key — never commit these
+users.json
+.users_key
+
 # browser cache and session data
 cache/class_urls.json
 
