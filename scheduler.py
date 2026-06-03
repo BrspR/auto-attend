@@ -13,6 +13,7 @@ from config import (
 )
 from lms_main import LMSMain
 from lms_nima import LMSNima
+import notify
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +32,9 @@ async def _attempt(lms_main: LMSMain, lms_nima: LMSNima, cls: dict, hold_until_t
     success = await lms.attend_class(name, cls["keywords"])
 
     if success:
+        now_hm = datetime.now(tz=TIMEZONE).strftime("%H:%M")
         logger.info(f"[{name}] Attendance confirmed — holding until {datetime.fromtimestamp(hold_until_ts, tz=TIMEZONE).strftime('%H:%M')}")
+        asyncio.create_task(notify.send_async(f"✅ حاضری ثبت شد: {name} ({now_hm})"))
         if lms_type == "nima":
             asyncio.create_task(lms_nima.attend_and_hold(name, cls["keywords"], hold_until_ts))
         else:
@@ -73,6 +76,7 @@ async def attend_job(lms_main: LMSMain, lms_nima: LMSNima, cls: dict,
 
         if datetime.now(tz=TIMEZONE) >= class_end:
             logger.warning(f"[{name}] Class ended — gave up after {attempt} failed attempt(s)")
+            asyncio.create_task(notify.send_async(f"❌ حاضری ثبت نشد: {name} — بعد از {attempt} تلاش"))
             return
 
         scale = min(scale * TIMEOUT_GROWTH, MAX_TIMEOUT_SCALE)
@@ -131,6 +135,7 @@ async def run_scheduler(username: str, password: str):
 
     scheduler.start()
     logger.info("Scheduler running. Press Ctrl+C to stop.\n")
+    asyncio.create_task(notify.send_async(f"🟢 ربات حاضری روشن شد — {len(CLASSES)} کلاس زیر نظر"))
 
     try:
         while True:

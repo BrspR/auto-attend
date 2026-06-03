@@ -19,3 +19,6 @@ nohup.out
 
 # nima live-session debug dumps (auto-saved when a ورود button isn't found)
 nima_debug_*.html
+
+# bbb in-room debug dumps (auto-saved the first time the bot is in a live room)
+bbb_debug_*.html

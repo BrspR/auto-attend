@@ -5,6 +5,8 @@ import time
 from pathlib import Path
 from playwright.async_api import async_playwright, Playwright, Browser, BrowserContext, Page
 
+import bbb
+
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://lms.aut.ac.ir"
@@ -367,19 +369,7 @@ class LMSNima:
             session_page = await self._open_session(page, class_name, keywords)
             hold_page = session_page or page
 
-            remaining = hold_until_ts - time.time()
-            logger.info(f"[Nima/{class_name}] Holding for {remaining/60:.1f} more minutes...")
-
-            while time.time() < hold_until_ts:
-                await asyncio.sleep(min(keepalive_interval, hold_until_ts - time.time()))
-                if time.time() < hold_until_ts:
-                    try:
-                        await hold_page.evaluate("window.scrollBy(0,1)")
-                        logger.info(f"[Nima/{class_name}] Keepalive ({(hold_until_ts - time.time())/60:.1f} min left)")
-                    except Exception:
-                        logger.warning(f"[Nima/{class_name}] Keepalive failed")
-                        break
-
-            logger.info(f"[Nima/{class_name}] ✓ Hold complete")
+            # Stay in the room: keepalive + auto-answer polls + خسته نباشید near end
+            await bbb.hold_with_presence(hold_page, class_name, hold_until_ts)
         finally:
             await ctx.close()

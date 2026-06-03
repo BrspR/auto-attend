@@ -109,6 +109,20 @@ async def cmd_discover(username: str, password: str):
         logger.info("For missing Fararoom classes, add URLs manually to cache/class_urls.json")
 
 
+def cmd_notify_test():
+    import notify
+    if not notify._token():
+        logger.error("BALE_BOT_TOKEN is not set in .env — add it first (see notify.py header)")
+        return
+    chat_id = os.getenv("BALE_CHAT_ID", "").strip() or notify.discover_chat_id()
+    if not chat_id:
+        logger.error("No chat_id found. DM your bot once in Bale (say 'hi'), then re-run --notify-test")
+        return
+    logger.info(f"Your chat_id is: {chat_id}  (optionally pin it as BALE_CHAT_ID in .env)")
+    ok = notify.send("✅ تست اعلان — ربات حاضری به Bale وصل شد")
+    logger.info("Test notification SENT ✓" if ok else "Test notification FAILED — check token/chat_id")
+
+
 def cmd_dry_run():
     from config import CLASSES, TIMEZONE
     from scheduler import _is_class_in_progress
@@ -141,10 +155,15 @@ async def main():
     parser.add_argument("--test-login", action="store_true", help="Test login credentials")
     parser.add_argument("--discover", action="store_true", help="Discover and cache class URLs")
     parser.add_argument("--dry-run", action="store_true", help="Show today's schedule without attending")
+    parser.add_argument("--notify-test", action="store_true", help="Send a test Bale notification and print your chat_id")
     args = parser.parse_args()
 
     if args.dry_run:
         cmd_dry_run()
+        return
+
+    if args.notify_test:
+        cmd_notify_test()
         return
 
     username, password = get_credentials()

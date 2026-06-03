@@ -6,7 +6,8 @@ Automatically logs into AUT's LMS, finds your live class session, clicks the att
 - Fires at each class's scheduled start time
 - Waits **T+5 min**, then logs in and clicks `ورود`
 - If it fails (session not live yet, slow network, login hiccup) it **retries every minute** until it works or the class ends — and each retry waits **1.5× longer** for pages to load (capped at 4×), so a slow/unstable connection eventually gets through
-- Holds the session open until the class ends (max 1h 45m)
+- Once in, it **stays in the room** (Listen-only) until the class ends (up to 2h), **auto-answers attendance polls** (نظرسنجی → first option, after a short human-like delay), and posts a plain **«خسته نباشید»** in the chat ~2 min before the end
+- Optional: **push notifications** (Bale) when a class is attended or missed
 
 ---
 
@@ -63,7 +64,24 @@ notepad config.py          # add your class schedule
 ```
 LMS_USERNAME=your.student.id
 LMS_PASSWORD=YourPassword
+
+# Optional — push notifications via Bale (leave blank to disable)
+BALE_BOT_TOKEN=
+BALE_CHAT_ID=
 ```
+
+---
+
+## Notifications (optional)
+
+Get pinged when a class is attended or missed. Telegram/email are blocked from an
+Iran server, so this uses **Bale**:
+
+1. In Bale, create a bot with `@botfather`, copy its token into `BALE_BOT_TOKEN`.
+2. DM your new bot once, then run `python main.py --notify-test` — it finds your
+   `chat_id`, sends a test message, and prints the id to optionally pin in `.env`.
+
+Leave `BALE_BOT_TOKEN` blank and notifications are simply skipped (no errors).
 
 ---
 

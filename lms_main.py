@@ -6,6 +6,8 @@ from datetime import datetime
 from pathlib import Path
 from playwright.async_api import async_playwright, Playwright, Browser, BrowserContext, Page
 
+import bbb
+
 logger = logging.getLogger(__name__)
 
 CACHE_FILE = Path(__file__).parent / "cache" / "class_urls.json"
@@ -282,23 +284,7 @@ class LMSMain:
                 logger.warning(f"[{class_name}] Could not join BBB for hold — session may not be live")
                 return
 
-            hold_end = datetime.fromtimestamp(hold_until_ts).strftime("%H:%M")
-            remaining = hold_until_ts - time.time()
-            logger.info(f"[{class_name}] Holding on BBB for {remaining/60:.1f} min until {hold_end}")
-
-            while time.time() < hold_until_ts:
-                sleep_secs = min(keepalive_interval, hold_until_ts - time.time())
-                if sleep_secs <= 0:
-                    break
-                await asyncio.sleep(sleep_secs)
-                if time.time() < hold_until_ts:
-                    try:
-                        await page.evaluate("window.scrollBy(0, 1)")
-                        logger.info(f"[{class_name}] Keepalive on BBB — {(hold_until_ts - time.time())/60:.1f} min left")
-                    except Exception:
-                        logger.warning(f"[{class_name}] BBB keepalive failed — page may have closed")
-                        break
-
-            logger.info(f"[{class_name}] ✓ Hold complete")
+            # Stay in the room: keepalive + auto-answer polls + خسته نباشید near end
+            await bbb.hold_with_presence(page, class_name, hold_until_ts)
         finally:
             await ctx.close()

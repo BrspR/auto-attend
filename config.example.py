@@ -2,7 +2,7 @@ import pytz
 
 TIMEZONE = pytz.timezone("Asia/Tehran")
 
-MAX_STAY_MINUTES = 105       # max time to stay in class (1h 45m)
+MAX_STAY_MINUTES = 120       # max time to stay in class (covers a full 2h class)
 FIRST_TRY_MINUTES = 5        # wait this long after class start before the first attempt
 RETRY_INTERVAL_MINUTES = 1   # if an attempt fails, retry every this-many minutes until success/class end
 TIMEOUT_GROWTH = 1.5         # multiply page timeouts by this after each failed attempt
