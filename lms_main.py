@@ -95,17 +95,22 @@ class LMSMain:
 
         logger.info("Logging into main LMS via SSO...")
         try:
-            await sso_btn.first.click()
-            await page.wait_for_load_state("domcontentloaded", timeout=self._t(30000))
-            logger.info(f"SSO page: {page.url}")
+            # Navigate directly to the Moodle SSO redirection page to trigger the redirect chain
+            await page.goto("https://courses.aut.ac.ir/login/index.php?authCASattras=CASattras", wait_until="commit", timeout=self._t(30000))
+            
+            import re
+            await page.wait_for_url(re.compile(r".*cas/login.*"), timeout=self._t(45000))
+            logger.info(f"SSO page reached: {page.url}")
 
-            await page.wait_for_selector("input[type='password']", timeout=self._t(20000))
+            await page.wait_for_selector("input[type='password']", timeout=self._t(30000))
             user_input = page.locator("input[type='text'], input[name*='user'], input[id*='user']").first
             await user_input.fill(self.username)
             await page.locator("input[type='password']").first.fill(self.password)
-            await page.locator("button[type='submit'], input[type='submit']").first.click()
-            await page.wait_for_load_state("domcontentloaded", timeout=self._t(40000))
-            await page.wait_for_timeout(self._t(3000))
+            await page.locator("button[type='submit'], input[type='submit']").first.click(no_wait_after=True)
+            
+            # Wait for either panel (success) or cas/login (failure)
+            await page.wait_for_url(re.compile(r".*(panel|cas/login).*"), timeout=self._t(50000))
+            await page.wait_for_timeout(self._t(2000))
         except Exception as e:
             logger.error(f"Login error: {e}")
             return False
@@ -151,7 +156,7 @@ class LMSMain:
         if await join_form.count() > 0:
             submit = join_form.locator("button[type='submit'], input[type='submit']").first
             if await submit.count() > 0:
-                await submit.click()
+                await submit.click(no_wait_after=True)
                 await page.wait_for_load_state("domcontentloaded", timeout=25000)
                 logger.info(f"[{class_name}] ✓ Joined via form! Now at: {page.url}")
                 return page.url

@@ -17,6 +17,7 @@ __pycache__/
 
 # runtime
 scheduler.log
+logs/
 nohup.out
 *.png
 .claude/

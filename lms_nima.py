@@ -122,21 +122,25 @@ class LMSNima:
             )
             await sso_btn.first.wait_for(timeout=self._t(20000))
             logger.info(f"Nima SSO button found on: {page.url}")
-            await sso_btn.first.click()
-            await page.wait_for_load_state("domcontentloaded", timeout=self._t(40000))
-            await page.wait_for_timeout(self._t(1500))
+            await sso_btn.first.click(no_wait_after=True)
+            
+            import re
+            await page.wait_for_url(re.compile(r".*(cas/login|users-panel).*"), timeout=self._t(45000))
 
             # CAS may prompt for credentials, or skip straight back if already SSO'd
-            if await page.locator("input[type='password']").count() > 0:
+            if "cas/login" in page.url:
                 logger.info(f"Nima CAS login form at: {page.url}")
+                await page.wait_for_selector("input[type='password']", timeout=self._t(30000))
                 user_input = page.locator(
                     "input[type='text'], input[name*='user'], input[id*='user']"
                 ).first
                 await user_input.fill(self.username)
                 await page.locator("input[type='password']").first.fill(self.password)
-                await page.locator("button[type='submit'], input[type='submit']").first.click()
-                await page.wait_for_load_state("domcontentloaded", timeout=self._t(40000))
-                await page.wait_for_timeout(self._t(4000))
+                await page.locator("button[type='submit'], input[type='submit']").first.click(no_wait_after=True)
+                
+                # Wait for either users-panel (success) or cas/login (failure)
+                await page.wait_for_url(re.compile(r".*(users-panel|cas/login).*"), timeout=self._t(50000))
+                await page.wait_for_timeout(self._t(2000))
         except Exception as e:
             logger.error(f"Nima login error: {e}")
             return False

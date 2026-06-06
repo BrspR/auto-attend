@@ -4,10 +4,12 @@ AUT Auto-Attendance Script
 Attends skipped classes automatically via LMS.
 
 Usage:
-    python main.py               # run scheduler (needs .env with credentials)
+    python main.py               # run scheduler (single-user, needs .env with credentials)
+    python main.py --serve       # multi-user mode (token-gated, deploy this on server)
     python main.py --test-login  # test login only
     python main.py --discover    # discover and cache all class URLs
     python main.py --dry-run     # show what would run today, no clicking
+    python main.py --gen-invites N  # generate N invite tokens
 """
 
 import argparse
@@ -124,11 +126,15 @@ def cmd_notify_test():
 
 
 BOT_COMMANDS = [
-    {"command": "start", "description": "فعال‌سازی با کد دعوت"},
-    {"command": "status", "description": "وضعیت ربات و کلاس بعدی"},
+    {"command": "token", "description": "فعال‌سازی با کد دعوت"},
+    {"command": "setup", "description": "انتخاب/تغییر کلاس‌ها"},
+    {"command": "start", "description": "روشن‌کردن حاضری"},
+    {"command": "stop", "description": "خاموش‌کردن حاضری"},
+    {"command": "status", "description": "وضعیت ربات"},
     {"command": "today", "description": "کلاس‌های امروز"},
+    {"command": "classes", "description": "کلاس‌های انتخابی"},
     {"command": "log", "description": "آخرین لاگ‌ها"},
-    {"command": "stop", "description": "توقف حاضری برای من"},
+    {"command": "help", "description": "نمایش دستورها"},
 ]
 BOT_DESCRIPTION = (
     "ربات حاضری خودکار دانشگاه. با کد دعوت فعالش کن، یوزر و رمز سامانه LMS رو بده، "
@@ -149,13 +155,21 @@ def cmd_bot_setup():
     logger.info("Bot profile updated.")
 
 
-def cmd_gen_invites(n: int):
+def cmd_show_tokens():
     import users
-    tokens = users.gen_invites(n)
-    logger.info(f"Generated {n} invite token(s) — give one to each friend:")
+    tokens = sorted(users.VALID_TOKENS)
+    # Check which are still available
+    data = users._load()
+    invites = data.get("invites", {})
+    logger.info(f"Hardcoded invite tokens ({len(tokens)} total):")
     for t in tokens:
-        logger.info(f"  {t}")
-    logger.info("They activate by sending the bot:  /start <token>")
+        inv = invites.get(t, {})
+        used = inv.get("used_by")
+        status = f"used by {used}" if used else "available"
+        logger.info(f"  {t}  — {status}")
+    available = sum(1 for t in tokens if not invites.get(t, {}).get("used_by"))
+    logger.info(f"\n{available}/{len(tokens)} still available")
+    logger.info("Users activate by sending the bot:  /token <code>")
 
 
 def cmd_dry_run():
@@ -185,6 +199,15 @@ def cmd_dry_run():
         )
 
 
+def _show_token_status():
+    """Show hardcoded token availability on startup."""
+    import users
+    data = users._load()
+    invites = data.get("invites", {})
+    available = sum(1 for t in users.VALID_TOKENS if not invites.get(t, {}).get("used_by"))
+    logger.info(f"Invite tokens: {available}/{len(users.VALID_TOKENS)} available")
+
+
 async def main():
     parser = argparse.ArgumentParser(description="AUT Auto-Attendance")
     parser.add_argument("--test-login", action="store_true", help="Test login credentials")
@@ -192,8 +215,8 @@ async def main():
     parser.add_argument("--dry-run", action="store_true", help="Show today's schedule without attending")
     parser.add_argument("--notify-test", action="store_true", help="Send a test Bale notification and print your chat_id")
     parser.add_argument("--bot-setup", action="store_true", help="Set the bot's command menu + description on Bale")
-    parser.add_argument("--gen-invites", type=int, metavar="N", help="Generate N invite tokens to hand to friends")
-    parser.add_argument("--serve", action="store_true", help="Multi-user mode: onboard friends by invite + run a worker per user")
+    parser.add_argument("--show-tokens", action="store_true", help="Show hardcoded invite tokens and their status")
+    parser.add_argument("--serve", action="store_true", help="Multi-user mode: token-gated, one worker per user")
     args = parser.parse_args()
 
     if args.dry_run:
@@ -208,14 +231,15 @@ async def main():
         cmd_bot_setup()
         return
 
-    if args.gen_invites:
-        cmd_gen_invites(args.gen_invites)
+    if args.show_tokens:
+        cmd_show_tokens()
         return
 
     if args.serve:
         logger.info("=" * 60)
-        logger.info("AUT Auto-Attendance — MULTI-USER mode")
+        logger.info("AUT Auto-Attendance — MULTI-USER mode (token-gated)")
         logger.info("=" * 60)
+        _show_token_status()
         from supervisor import run_supervisor
         await run_supervisor()
         return
@@ -230,9 +254,9 @@ async def main():
         await cmd_discover(username, password)
         return
 
-    # Default: run the scheduler
+    # Default: run the scheduler (single-user mode, your own classes)
     logger.info("=" * 60)
-    logger.info("AUT Auto-Attendance Starting")
+    logger.info("AUT Auto-Attendance Starting (single-user)")
     logger.info("=" * 60)
     from scheduler import run_scheduler
     await run_scheduler(username, password)

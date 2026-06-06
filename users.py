@@ -76,29 +76,42 @@ def _save(data: dict):
     os.chmod(USERS_FILE, 0o600)
 
 
-# ---------------- invites ----------------
-def gen_invites(n: int) -> list:
-    data = _load()
-    out = []
-    for _ in range(n):
-        t = secrets.token_urlsafe(6)
-        data["invites"][t] = {"used_by": None, "created": time.time()}
-        out.append(t)
-    _save(data)
-    return out
+# ---------------- hardcoded invite tokens ----------------
+# These are the ONLY valid tokens. Nobody can generate new ones.
+# Cloners don't have the Bale bot token (.env is gitignored), so these are
+# useless without the matching bot instance.
+VALID_TOKENS = frozenset([
+    "qSQIwtXn", "Fa95jWoO", "ArnLsEJS", "6Gp0BGsP", "yZj1o2v6",
+    "pO2XnvqA", "znGjPuMH", "UEp01LYv", "hXlzo_EE", "ASP2FuWF",
+    "_a4O5o-U", "BJ5xVFn8", "gme8k1R8", "eAlivlpc", "uwHw8DbQ",
+])
+
+
+def gen_invites(n: int = 0) -> list:
+    """Return the hardcoded tokens (ignores n). For display only."""
+    return sorted(VALID_TOKENS)
 
 
 def invite_open(token: str) -> bool:
-    inv = _load()["invites"].get(token)
-    return bool(inv) and inv.get("used_by") is None
+    """True if the token is one of the hardcoded 15 AND hasn't been redeemed yet."""
+    if token not in VALID_TOKENS:
+        return False
+    inv = _load().get("invites", {}).get(token)
+    if inv and inv.get("used_by") is not None:
+        return False  # already used
+    return True
 
 
 def redeem_invite(token: str, chat_id) -> bool:
-    data = _load()
-    inv = data["invites"].get(token)
-    if not inv or inv.get("used_by") is not None:
+    """Mark a hardcoded token as used by a chat_id."""
+    if token not in VALID_TOKENS:
         return False
-    inv["used_by"] = str(chat_id)
+    data = _load()
+    invites = data.setdefault("invites", {})
+    inv = invites.get(token, {})
+    if inv.get("used_by") is not None:
+        return False
+    invites[token] = {"used_by": str(chat_id), "created": time.time()}
     _save(data)
     return True
 
@@ -118,6 +131,8 @@ def add_user(chat_id, username: str, password: str) -> bool:
         "password_enc": encrypt(password),
         "enabled": True,
         "joined": time.time(),
+        "classes": [],          # [{name, url, lms}] — filled during setup
+        "setup_done": False,    # True after user picks their classes
     }
     _save(data)
     return True
@@ -132,6 +147,27 @@ def get_credentials(chat_id):
     if not u:
         return None
     return u["username"], decrypt(u["password_enc"])
+
+
+def get_classes(chat_id) -> list:
+    """Return the user's selected classes: [{name, url, lms}]."""
+    u = get_user(chat_id)
+    return (u or {}).get("classes", [])
+
+
+def set_classes(chat_id, classes: list):
+    """Save the user's class selection."""
+    data = _load()
+    cid = str(chat_id)
+    if cid in data["users"]:
+        data["users"][cid]["classes"] = classes
+        data["users"][cid]["setup_done"] = True
+        _save(data)
+
+
+def is_setup_done(chat_id) -> bool:
+    u = get_user(chat_id)
+    return bool((u or {}).get("setup_done"))
 
 
 def all_users() -> dict:
@@ -154,3 +190,4 @@ def remove_user(chat_id):
     data = _load()
     data["users"].pop(str(chat_id), None)
     _save(data)
+

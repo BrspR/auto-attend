@@ -1,8 +1,9 @@
 """
-Multi-user supervisor (the `--serve` mode).
+Multi-user supervisor — the deployment mode.
 
-Loads every enabled user, runs one UserWorker per user, and runs the invite-gated
-onboarding/command poller. New signups start a worker on the fly; /stop cancels one.
+Loads every enabled user from users.json, runs one UserWorker per user,
+and runs the token-gated onboarding/command poller. New signups start a
+worker on the fly; /stop cancels one.
 
 Each worker isolates its own Bale chat (via notify.bind_chat) and uses on-demand
 browsers, so this stays within the box's limits for a small group of friends.
@@ -48,10 +49,10 @@ def _stop_worker(chat_id):
 
 async def run_supervisor():
     logger.info("=" * 50)
-    logger.info("Multi-user supervisor starting")
+    logger.info("Multi-user supervisor starting (token-gated)")
     for cid, u in users.all_users().items():
         if u.get("enabled"):
             _start_worker(cid)
     logger.info(f"[supervisor] {len(_workers)} worker(s) running, {users.count()} registered (max {users.MAX_USERS})")
-    # The poller runs forever, handling onboarding + commands.
-    await commands.run_poller(serve_mode=True, on_register=_start_worker, on_stop=_stop_worker)
+    # The poller runs forever, handling token auth + commands.
+    await commands.run_poller(on_register=_start_worker, on_stop=_stop_worker)

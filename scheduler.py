@@ -91,18 +91,41 @@ async def attend_job(lms_main: LMSMain, lms_nima: LMSNima, cls: dict,
 
 
 async def morning_plan():
-    """Reset today's status and send the day's class plan."""
+    """Reset today's status and send the day's class plan (single-user mode)."""
     state.reset_day()
-    text = commands.build_today()
+    # In single-user mode, build a simple summary from config.CLASSES
+    from config import CLASSES
+    now = datetime.now(tz=TIMEZONE)
+    _DAY = {0: "دوشنبه", 1: "سه‌شنبه", 2: "چهارشنبه", 3: "پنجشنبه", 4: "جمعه", 5: "شنبه", 6: "یک‌شنبه"}
+    today_classes = [c for c in CLASSES if now.weekday() in c["days"]]
+    if not today_classes:
+        text = f"📋 امروز ({_DAY[now.weekday()]}) کلاسی نداری."
+    else:
+        lines = [f"📋 کلاس‌های امروز ({_DAY[now.weekday()]}):"]
+        for c in sorted(today_classes, key=lambda c: c["start"]):
+            st = state.get_status(c["name"])
+            icon = {"attended": "✅", "failed": "❌", "pending": "⏳"}.get((st or {}).get("state", ""), "•")
+            lines.append(f"{icon} {c['start']}–{c['end']}  {c['name']}")
+        text = "\n".join(lines)
     logger.info("[summary] morning plan sent")
     await notify.send_async(text)
 
 
 async def evening_summary_job():
-    text = commands.evening_summary()
-    if text:
-        logger.info("[summary] evening summary sent")
-        await notify.send_async(text)
+    from config import CLASSES
+    today_classes = [c for c in CLASSES if datetime.now(tz=TIMEZONE).weekday() in c["days"]]
+    if not today_classes:
+        return
+    done = sum(1 for c in today_classes if (state.get_status(c["name"]) or {}).get("state") == "attended")
+    lines = [f"🌙 خلاصه امروز: {done}/{len(today_classes)} حاضری"]
+    _ICON = {"attended": "✅", "failed": "❌", "pending": "⏳"}
+    for c in today_classes:
+        st = state.get_status(c["name"])
+        icon = _ICON.get((st or {}).get("state", ""), "•")
+        lines.append(f"{icon} {c['name']}")
+    text = "\n".join(lines)
+    logger.info("[summary] evening summary sent")
+    await notify.send_async(text)
 
 
 async def _startup_login_health(lms_main: LMSMain, lms_nima: LMSNima):
@@ -171,7 +194,7 @@ async def run_scheduler(username: str, password: str):
     scheduler.add_job(evening_summary_job, CronTrigger(hour=22, minute=0, timezone=TIMEZONE),
                       id="__evening_summary", misfire_grace_time=3600)
 
-    # Two-way command bot (/status, /today, /log) + startup login health check
+    # Two-way command bot (token-gated) + startup login health check
     asyncio.create_task(commands.run_poller())
     asyncio.create_task(_startup_login_health(lms_main, lms_nima))
 
