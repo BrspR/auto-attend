@@ -14,6 +14,19 @@ CACHE_FILE = Path(__file__).parent / "cache" / "class_urls.json"
 BASE_URL = "https://lmshome.aut.ac.ir"
 
 
+# Launch flags that cut per-browser RAM and avoid the multi-browser /dev/shm
+# crash — important when many user workers run headless Chromium at once.
+CHROMIUM_ARGS = [
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+    "--no-sandbox",
+    "--disable-extensions",
+    "--disable-background-networking",
+    "--disable-background-timer-throttling",
+    "--renderer-process-limit=1",
+]
+
+
 def _norm(s: str) -> str:
     """
     Normalize Persian text for keyword matching. The LMS renders class names with
@@ -54,7 +67,7 @@ class LMSMain:
 
     async def start(self):
         self._pw = await async_playwright().start()
-        self._browser = await self._pw.chromium.launch(headless=True)
+        self._browser = await self._pw.chromium.launch(headless=True, args=CHROMIUM_ARGS)
         logger.info("Browser started")
 
     async def stop(self):

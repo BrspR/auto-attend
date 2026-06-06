@@ -48,8 +48,9 @@ class LMSNima:
         return int(ms * self.timeout_scale)
 
     async def start(self):
+        from lms_main import CHROMIUM_ARGS
         self._pw = await async_playwright().start()
-        self._browser = await self._pw.chromium.launch(headless=True)
+        self._browser = await self._pw.chromium.launch(headless=True, args=CHROMIUM_ARGS)
         logger.info("Nima browser started")
 
     async def stop(self):
