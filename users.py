@@ -17,8 +17,10 @@ import os
 import secrets
 import time
 from pathlib import Path
+from dotenv import load_dotenv
 
 BASE = Path(__file__).parent
+load_dotenv(BASE / ".env")
 USERS_FILE = BASE / "users.json"
 KEY_FILE = BASE / ".users_key"
 MAX_USERS = 15
@@ -76,15 +78,10 @@ def _save(data: dict):
     os.chmod(USERS_FILE, 0o600)
 
 
-# ---------------- hardcoded invite tokens ----------------
-# These are the ONLY valid tokens. Nobody can generate new ones.
-# Cloners don't have the Bale bot token (.env is gitignored), so these are
-# useless without the matching bot instance.
-VALID_TOKENS = frozenset([
-    "qSQIwtXn", "Fa95jWoO", "ArnLsEJS", "6Gp0BGsP", "yZj1o2v6",
-    "pO2XnvqA", "znGjPuMH", "UEp01LYv", "hXlzo_EE", "ASP2FuWF",
-    "_a4O5o-U", "BJ5xVFn8", "gme8k1R8", "eAlivlpc", "uwHw8DbQ",
-])
+# ---------------- invite tokens loaded from .env ----------------
+# Read from gitignored .env file to keep them secure and hidden from git.
+_env_tokens = os.getenv("INVITE_TOKENS", "")
+VALID_TOKENS = frozenset([t.strip() for t in _env_tokens.split(",") if t.strip()])
 
 
 def gen_invites(n: int = 0) -> list:

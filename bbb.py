@@ -170,10 +170,53 @@ async def hold_with_presence(page, label: str, hold_until_ts: float, *, send_kha
         except Exception as e:
             logger.warning(f"[BBB/{label}] poll-check error: {e}")
 
-        if send_khaste and not khaste_sent and time.time() >= khaste_target:
-            khaste_sent = await send_chat(page, label, KHASTE_TEXT)
-            if khaste_sent:
-                await notify.send_async(f"💬 «خسته نباشید» در «{label}» ارسال شد")
+        if send_khaste and not khaste_sent:
+            time_trigger = time.time() >= khaste_target
+            chat_trigger = False
+            other_count = 0
+            try:
+                other_count = await page.evaluate("""() => {
+                    const selectors = [
+                        "[data-test='chatMessageText']",
+                        "[class*='messageText']",
+                        "[class*='chat-message']",
+                        ".messageText",
+                        ".chat-message"
+                    ];
+                    let elements = [];
+                    for (const sel of selectors) {
+                        const found = document.querySelectorAll(sel);
+                        if (found.length > 0) {
+                            elements = Array.from(found);
+                            break;
+                        }
+                    }
+                    if (elements.length === 0) {
+                        const all = document.querySelectorAll("div, span, p");
+                        elements = Array.from(all).filter(el => {
+                            return el.children.length === 0 && el.textContent.includes("خسته نباش");
+                        });
+                    }
+                    let count = 0;
+                    for (const el of elements) {
+                        const txt = el.textContent || "";
+                        if (txt.includes("خسته نباش")) {
+                            count++;
+                        }
+                    }
+                    return count;
+                }""")
+                if other_count >= 3:
+                    logger.info(f"[BBB/{label}] Detected {other_count} 'khaste nabashid' messages from others. Triggering chat-based response!")
+                    chat_trigger = True
+            except Exception as e:
+                logger.warning(f"[BBB/{label}] failed to read chat messages: {e}")
+
+            if time_trigger or chat_trigger:
+                khaste_sent = await send_chat(page, label, KHASTE_TEXT)
+                if khaste_sent:
+                    trigger_type = "زمان کلاس" if time_trigger else f"چت دیگران ({other_count} پیام)"
+                    await notify.send_async(f"💬 «خسته نباشید» در «{label}» ارسال شد (محرک: {trigger_type})")
 
         sleep_for = min(POLL_CHECK_SECS, max(1.0, hold_until_ts - time.time()))
         await asyncio.sleep(sleep_for)
