@@ -24,6 +24,7 @@ CHROMIUM_ARGS = [
     "--disable-background-networking",
     "--disable-background-timer-throttling",
     "--renderer-process-limit=1",
+    "--js-flags=--max-old-space-size=256",
 ]
 
 
@@ -80,6 +81,14 @@ class LMSMain:
     async def _new_page(self) -> tuple[BrowserContext, Page]:
         ctx = await self._browser.new_context(locale="fa-IR")
         page = await ctx.new_page()
+        # Optimize memory/CPU by blocking images, fonts, and media
+        async def block_assets(route):
+            if route.request.resource_type in ("image", "font", "media"):
+                await route.abort()
+            else:
+                await route.continue_()
+        await page.route("**/*", block_assets)
+
         # Scaled defaults so even calls without an explicit timeout grow on retries
         page.set_default_timeout(self._t(30000))
         page.set_default_navigation_timeout(self._t(40000))
