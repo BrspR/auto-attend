@@ -9,7 +9,7 @@ Usage:
     python main.py --test-login  # test login only
     python main.py --discover    # discover and cache all class URLs
     python main.py --dry-run     # show what would run today, no clicking
-    python main.py --gen-invites N  # generate N invite tokens
+    python main.py --show-tokens # list invite tokens from .env and their status
 """
 
 import argparse

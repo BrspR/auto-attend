@@ -287,6 +287,35 @@ class LMSMain:
         finally:
             await ctx.close()
 
+    async def check_live_many(self, lessons: list[dict]) -> dict[str, bool]:
+        """Check several lessons ({name, url}) with ONE login/context.
+        Returns {url: is_live}. Used by multi-user workers — a per-class
+        login (check_live) makes a user with 11 classes do 11 SSO logins
+        per sweep, which is slow and hammers CAS with redundant logins."""
+        out: dict[str, bool] = {}
+        if not lessons:
+            return out
+        ctx, page = await self._new_page()
+        try:
+            if not await self._login_page(page):
+                return out
+            for lesson in lessons:
+                url = lesson["url"]
+                try:
+                    await page.goto(url, wait_until="domcontentloaded", timeout=self._t(30000))
+                    await page.wait_for_timeout(1500)
+                    btn = page.locator(
+                        "a:has-text('ورود به جلسه'), a:has-text('بیگبلوباتن'), "
+                        "a.btn-success, a[href*='blue3'], a[href*='bigbluebutton'], form[action*='/join']"
+                    )
+                    out[url] = await btn.count() > 0
+                except Exception as e:
+                    logger.warning(f"[{lesson.get('name', url)}] live-check error: {e}")
+                    out[url] = False
+            return out
+        finally:
+            await ctx.close()
+
     async def check_live(self, lesson_url: str) -> bool:
         """True if this lesson currently has a live BBB join button (no click)."""
         ctx, page = await self._new_page()

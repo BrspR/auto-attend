@@ -74,8 +74,11 @@ def _load() -> dict:
 
 
 def _save(data: dict):
-    USERS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.chmod(USERS_FILE, 0o600)
+    # Atomic write: a crash mid-write must never corrupt the credential store.
+    tmp = USERS_FILE.with_name(USERS_FILE.name + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, USERS_FILE)
 
 
 # ---------------- invite tokens loaded from .env ----------------

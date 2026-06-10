@@ -99,8 +99,8 @@ Copy from `config.example.py` and fill in your own schedule:
 ```python
 CLASSES = [
     {
-        "name": "نام درس 2",       # any label (shows in logs)
-        "keywords": ["نام درس"],    # used to auto-find the class URL
+        "name": "نام درس",              # any label (shows in logs)
+        "keywords": ["نام درس"],         # used to auto-find the class URL
         "days": [5, 0],                  # 0=Mon 1=Tue 2=Wed 3=Thu 4=Fri 5=Sat 6=Sun
         "start": "13:00",               # class start (24h, Tehran time)
         "end":   "15:00",               # class end
@@ -116,7 +116,7 @@ CLASSES = [
 | فراروم (Fararoom) | `lmshome.aut.ac.ir` | `"main"` |
 | نیما (Nima) | `lms.aut.ac.ir` | `"nima"` |
 
-Almost all classes use `"main"`. Use `"nima"` only for classes hosted on `lms.aut.ac.ir` (e.g. نام درس, نام درس).
+Almost all classes use `"main"`. Use `"nima"` only for classes hosted on `lms.aut.ac.ir`.
 
 ---
 
@@ -145,7 +145,7 @@ This logs in and finds the session URL for each Fararoom class, saving to `cache
 If a Fararoom class isn't found automatically, add it manually to `cache/class_urls.json`:
 ```json
 {
-  "نام درس 2": "https://lmshome.aut.ac.ir/panel/myLesson/COURSE_ID/GROUP/TERM"
+  "نام درس": "https://lmshome.aut.ac.ir/panel/myLesson/COURSE_ID/GROUP/TERM"
 }
 ```
 
@@ -193,9 +193,13 @@ A single supervisor onboards a small, invite-gated group and runs one worker per
 person (their own login, own browser-on-demand, own private Bale messages).
 
 ```bash
-python main.py --gen-invites 15      # print 15 invite tokens; hand one to each friend
+# put your own invite codes (comma-separated) in .env as INVITE_TOKENS=..., then:
+python main.py --show-tokens         # see which invite codes are still unused
 python main.py --serve               # run the supervisor (workers + onboarding bot)
 ```
+
+Invite codes are private and never stored in this repo — if you want one for an
+already-running bot, ask its operator.
 
 A friend activates by DMing the bot:  `/start <token>` → it asks for their LMS
 username, then password (the password message is deleted after it's checked), logs

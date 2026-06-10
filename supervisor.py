@@ -3,15 +3,18 @@ Multi-user supervisor — the deployment mode.
 
 Loads every enabled user from users.json, runs one UserWorker per user,
 and runs the token-gated onboarding/command poller. New signups start a
-worker on the fly; /stop cancels one.
+worker on the fly; /stop cancels one (including its in-room holds).
 
 Each worker isolates its own Bale chat (via notify.bind_chat) and uses on-demand
 browsers, so this stays within the box's limits for a small group of friends.
 """
 import asyncio
 import logging
+from datetime import datetime, timedelta
 
 import commands
+import config
+import state
 import users
 from worker import UserWorker
 
@@ -42,9 +45,19 @@ def _stop_worker(chat_id):
     entry = _workers.pop(cid, None)
     if entry:
         task, w = entry
-        w.running = False
+        w.shutdown()   # stops the loop AND cancels in-flight presence holds
         task.cancel()
         logger.info(f"[supervisor] stopped worker for {cid}")
+
+
+async def _daily_reset():
+    """Clear yesterday's per-user statuses every morning so /today is accurate."""
+    while True:
+        now = datetime.now(tz=config.TIMEZONE)
+        nxt = (now + timedelta(days=1)).replace(hour=4, minute=0, second=0, microsecond=0)
+        await asyncio.sleep((nxt - now).total_seconds())
+        state.reset_day()
+        logger.info("[supervisor] daily status reset")
 
 
 async def run_supervisor():
@@ -54,5 +67,6 @@ async def run_supervisor():
         if u.get("enabled"):
             _start_worker(cid)
     logger.info(f"[supervisor] {len(_workers)} worker(s) running, {users.count()} registered (max {users.MAX_USERS})")
+    asyncio.create_task(_daily_reset())
     # The poller runs forever, handling token auth + commands.
     await commands.run_poller(on_register=_start_worker, on_stop=_stop_worker)

@@ -425,6 +425,29 @@ async def _send(cid: str, text: str):
 
 
 # ---- poller ----
+# Per-chat locks: messages from the SAME chat are handled in order, but one
+# user's slow onboarding (login verify ≈ minutes) no longer blocks everyone
+# else's messages — each update is dispatched as its own task.
+_chat_locks: dict = {}
+
+
+async def _handle_update(upd: dict, on_register, on_stop):
+    msg = upd.get("message") or {}
+    text = msg.get("text") or ""
+    chat = (msg.get("chat") or {}).get("id")
+    msg_id = msg.get("message_id")
+    if not text or chat is None:
+        return
+    lock = _chat_locks.setdefault(str(chat), asyncio.Lock())
+    try:
+        async with lock:
+            reply = await dispatch(text, chat, msg_id, on_register, on_stop)
+        if reply:
+            await asyncio.get_event_loop().run_in_executor(None, notify.send, reply, chat)
+    except Exception as e:
+        logger.warning(f"[commands] handling message from {chat} failed: {e}")
+
+
 async def run_poller(on_register=None, on_stop=None):
     """Poll getUpdates and route every message through `dispatch`."""
     if not notify._token():
@@ -439,15 +462,7 @@ async def run_poller(on_register=None, on_stop=None):
             updates = await loop.run_in_executor(None, notify.get_updates, offset, 0)
             for upd in updates:
                 offset = upd["update_id"] + 1
-                msg = upd.get("message") or {}
-                text = msg.get("text") or ""
-                chat = (msg.get("chat") or {}).get("id")
-                msg_id = msg.get("message_id")
-                if not text or chat is None:
-                    continue
-                reply = await dispatch(text, chat, msg_id, on_register, on_stop)
-                if reply:
-                    await loop.run_in_executor(None, notify.send, reply, chat)
+                asyncio.create_task(_handle_update(upd, on_register, on_stop))
         except Exception as e:
             logger.warning(f"[commands] poll error: {e}")
         await asyncio.sleep(3)
