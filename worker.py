@@ -6,10 +6,10 @@ notification routes to that user via notify's context var), then uses the user's
 SELECTED classes (from /setup) to check for live sessions.
 
 Resource model: browsers are on-demand, NOT always-on. A global semaphore caps how
-many users check concurrently, a second semaphore caps how many 2-hour presence
-holds run at once (attendance is already registered by the join click, so when hold
-capacity is full the hold is skipped, not the attendance), and each user's whole
-Fararoom sweep shares ONE login/context — so 15 users do not mean 15 open browsers.
+many users check concurrently, and each user's whole Fararoom sweep shares ONE
+login/context. Presence holds (staying in the room for the whole class) are NEVER
+skipped or capped — being visibly present in the BBB room for the full class is the
+whole point, so the box must simply be sized for the worst-case overlap.
 
 PENDING LIVE VERIFICATION: the live-session detection and the whole BBB in-room layer
 have never run in a real class yet. Treat first runs as best-effort; the bbb_debug_*
@@ -17,7 +17,6 @@ dumps capture the real DOM for fixing selectors.
 """
 import asyncio
 import logging
-import os
 import time
 from datetime import datetime
 
@@ -38,23 +37,6 @@ HOLD_SECS = config.MAX_STAY_MINUTES * 60
 
 # Cap concurrent check-browsers across ALL users so the box doesn't get swamped.
 _check_sem = asyncio.Semaphore(3)
-
-# Cap concurrent 2h presence-hold browsers across ALL users. Class times cluster
-# (everyone's 13:00 starts together), so without a cap 15 users can mean 15+
-# Chromiums ≈ OOM on a small VPS. Attendance itself (the join click) is never
-# skipped — only the optional stay-in-room presence is, when at capacity.
-MAX_CONCURRENT_HOLDS = int(os.getenv("MAX_CONCURRENT_HOLDS", "8"))
-_hold_sem = asyncio.Semaphore(MAX_CONCURRENT_HOLDS)
-
-
-async def _try_acquire_hold() -> bool:
-    """Acquire a hold slot without queueing behind a 2-hour wait."""
-    try:
-        await asyncio.wait_for(_hold_sem.acquire(), timeout=1)
-        return True
-    except asyncio.TimeoutError:
-        return False
-
 
 class UserWorker:
     def __init__(self, chat_id, username: str, password: str):
@@ -163,16 +145,12 @@ class UserWorker:
                 state.set_status(name, "attended", chat_id=self.chat_id)
                 append_user_log(self.chat_id, f"✅ حاضری ثبت شد: {name}")
                 await notify.send_async(f"✅ حاضری ثبت شد: {name}")
-                # Optional presence hold (polls + خسته نباشید) — capped globally.
-                if await _try_acquire_hold():
-                    try:
-                        await lms.attend_and_hold(name, [], url, time.time() + HOLD_SECS)
-                    except Exception as e:
-                        logger.warning(f"[user {self.chat_id}] hold {name} error: {e}")
-                    finally:
-                        _hold_sem.release()
-                else:
-                    logger.info(f"[user {self.chat_id}] hold capacity full — {name} attended, presence hold skipped")
+                # Presence hold (stay in room + polls + خسته نباشید) — ALWAYS runs;
+                # being present for the whole class is non-negotiable.
+                try:
+                    await lms.attend_and_hold(name, [], url, time.time() + HOLD_SECS)
+                except Exception as e:
+                    logger.warning(f"[user {self.chat_id}] hold {name} error: {e}")
             finally:
                 try:
                     await lms.stop()
@@ -183,15 +161,10 @@ class UserWorker:
 
     async def _nima_hold(self, nima: LMSNima, name: str):
         try:
-            if await _try_acquire_hold():
-                try:
-                    await nima.attend_and_hold(name, [name], time.time() + HOLD_SECS)
-                except Exception as e:
-                    logger.warning(f"[user {self.chat_id}] nima hold {name} error: {e}")
-                finally:
-                    _hold_sem.release()
-            else:
-                logger.info(f"[user {self.chat_id}] hold capacity full — {name} attended, presence hold skipped")
+            try:
+                await nima.attend_and_hold(name, [name], time.time() + HOLD_SECS)
+            except Exception as e:
+                logger.warning(f"[user {self.chat_id}] nima hold {name} error: {e}")
         finally:
             try:
                 await nima.stop()
