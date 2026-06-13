@@ -76,7 +76,12 @@ class UserWorker:
             for c in cls_list if c.get("lms") == "main" and c.get("url")
         ]
         self.nima_classes = [
-            {"name": c["name"]}
+            {
+                "name":  c["name"],
+                "days":  c.get("days"),
+                "start": c.get("start"),
+                "end":   c.get("end"),
+            }
             for c in cls_list if c.get("lms") == "nima"
         ]
 
@@ -127,6 +132,24 @@ class UserWorker:
             return min(soonest, 3600)
         return CHECK_INTERVAL
 
+    def _in_nima_window(self, nima_cls: dict) -> bool:
+        """Return True if now is within this Nima class's scheduled window.
+        If no schedule is stored, always returns True (old behaviour).
+        """
+        days = nima_cls.get("days")
+        start = nima_cls.get("start")
+        if not days or not start:
+            return True
+        now = datetime.now(tz=config.TIMEZONE)
+        if now.weekday() not in days:
+            return False
+        sh, sm = map(int, start.split(":"))
+        end_str = nima_cls.get("end") or f"{sh+2}:{sm:02d}"
+        eh, em = map(int, end_str.split(":"))
+        window_start = now.replace(hour=sh, minute=sm, second=0, microsecond=0) - timedelta(minutes=5)
+        window_end   = now.replace(hour=eh, minute=em, second=0, microsecond=0) + timedelta(minutes=10)
+        return window_start <= now <= window_end
+
     # ---- one Fararoom + Nima sweep ----
     async def _check_cycle(self):
         # --- Fararoom classes: ONE login/context for the whole sweep ---
@@ -153,6 +176,8 @@ class UserWorker:
         for nima_cls in self.nima_classes:
             nima_name = nima_cls["name"]
             if self.nima_held.get(nima_name, 0) > time.time():
+                continue
+            if not self._in_nima_window(nima_cls):
                 continue
             try:
                 async with _check_sem:

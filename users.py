@@ -212,13 +212,16 @@ def set_classes(chat_id, classes: list):
         _save_user(chat_id, u)
 
 
-def set_schedule(chat_id, class_url: str, days: list, start: str | None, end: str | None):
-    """Patch schedule fields onto one class entry — called after scraping."""
+def set_schedule(chat_id, class_url: str, days: list, start: str | None, end: str | None, class_name: str = ""):
+    """Patch schedule fields onto one class entry.
+    Matches by URL for Fararoom classes; falls back to name match for Nima (URL is empty).
+    """
     u = _load_user(chat_id)
     if not u:
         return
     for cls in u.get("classes", []):
-        if cls.get("url") == class_url:
+        if (class_url and cls.get("url") == class_url) or \
+           (not class_url and class_name and cls.get("name") == class_name):
             cls["days"] = days
             cls["start"] = start
             cls["end"] = end

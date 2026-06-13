@@ -36,6 +36,41 @@ logger = logging.getLogger(__name__)
 
 LOG_DIR = Path(__file__).parent / "logs"
 _DAY = {0: "دوشنبه", 1: "سه‌شنبه", 2: "چهارشنبه", 3: "پنجشنبه", 4: "جمعه", 5: "شنبه", 6: "یک‌شنبه"}
+
+# Nima schedule parsing helpers
+_NIMA_DAY_MAP = {
+    "یکشنبه": 6, "یک‌شنبه": 6,
+    "دوشنبه": 0,
+    "سه‌شنبه": 1, "سه شنبه": 1,
+    "چهارشنبه": 2,
+    "پنجشنبه": 3,
+    "جمعه": 4,
+    "شنبه": 5,   # must be last — it's a suffix of all others
+}
+_FA2EN = str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789")
+
+def _parse_nima_schedule_line(line: str) -> tuple:
+    """Parse '1 شنبه 13:30 15:30' → (0-based idx, [day_nums], start, end).
+    Returns (None, [], None, None) on failure.
+    """
+    line = line.translate(_FA2EN).strip()
+    parts = line.split()
+    if len(parts) < 3:
+        return None, [], None, None
+    try:
+        idx = int(parts[0]) - 1
+    except ValueError:
+        return None, [], None, None
+    raw_day = parts[1]
+    days = []
+    # longest names first to avoid 'شنبه' matching inside 'یکشنبه'
+    for name, num in _NIMA_DAY_MAP.items():
+        if name in raw_day:
+            days.append(num)
+            break
+    start = parts[2] if len(parts) > 2 else None
+    end   = parts[3] if len(parts) > 3 else None
+    return idx, days, start, end
 _ICON = {"attended": "✅", "failed": "❌", "pending": "⏳"}
 
 HELP_UNAUTHED = "سلام 👋 برای استفاده از ربات، اول کد دعوتت رو بفرست:\n/token <کد>"
@@ -281,6 +316,23 @@ async def dispatch(text: str, chat_id, msg_id, on_register=None, on_stop=None) -
     return HELP_AUTHED
 
 
+def _finish_setup(cid: str, selected: list, on_register) -> str:
+    main_count = sum(1 for c in selected if c["lms"] == "main")
+    nima_count = sum(1 for c in selected if c["lms"] == "nima")
+    lines = [f"✅ تنظیم تمام شد! {len(selected)} کلاس ذخیره شد:"]
+    for c in selected:
+        label = "نیما" if c["lms"] == "nima" else "فراروم"
+        sched = f" — {c['start']}" if c.get("start") else ""
+        lines.append(f"  • {c['name']}  ({label}{sched})")
+    lines.append(f"\nفراروم: {main_count} | نیما: {nima_count}")
+    lines.append("\nبرای شروع حاضری خودکار: /start")
+    lines.append("تغییر کلاس‌ها: /setup")
+    append_user_log(cid, f"📚 {len(selected)} کلاس تنظیم شد ({main_count} فراروم, {nima_count} نیما)")
+    if on_register:
+        on_register(cid)
+    return "\n".join(lines)
+
+
 async def _handle_onboarding(cid: str, text: str, msg_id, on_register) -> str:
     """Handle the multi-step onboarding + class selection flow."""
     st = _onboarding[cid]
@@ -392,33 +444,45 @@ async def _handle_onboarding(cid: str, text: str, msg_id, on_register) -> str:
             return ("⚠️ هیچ کلاسی انتخاب نشد.\n"
                     "هر وقت خواستی دوباره تنظیم کنی: /setup")
 
-        # Save and finish
+        # Save classes now; Fararoom schedules scraped in background
         users.set_classes(cid, selected)
-        _onboarding.pop(cid, None)
-
-        # Scrape schedule times in the background — user doesn't wait for this
         main_cls = [c for c in selected if c.get("lms") == "main" and c.get("url")]
         if main_cls:
             creds = users.get_credentials(cid)
             if creds:
                 asyncio.create_task(_scrape_schedules_bg(cid, creds[0], creds[1], main_cls))
 
-        main_count = sum(1 for c in selected if c["lms"] == "main")
-        nima_count = sum(1 for c in selected if c["lms"] == "nima")
-        lines = [f"✅ تنظیم تمام شد! {len(selected)} کلاس ذخیره شد:"]
-        for c in selected:
-            lms_label = "نیما" if c["lms"] == "nima" else "فراروم"
-            lines.append(f"  • {c['name']}  ({lms_label})")
-        lines.append(f"\nفراروم: {main_count} | نیما: {nima_count}")
-        lines.append("\nبرای شروع حاضری خودکار: /start")
-        lines.append("تغییر کلاس‌ها: /setup")
+        nima_selected = [c for c in selected if c["lms"] == "nima"]
+        if nima_selected:
+            st["selected"] = selected
+            st["step"] = "nima_schedule"
+            lines = ["⏰ برای کلاس‌های نیما ساعت کلاس رو بفرست تا ربات سر وقت وصل بشه:"]
+            for i, c in enumerate(nima_selected, 1):
+                lines.append(f"  {i}. {c['name']}")
+            lines.append("\nبرای هر کلاس یه خط بفرست — شماره، روز، شروع، پایان. مثال:")
+            lines.append("  1 شنبه 13:30 15:30")
+            lines.append("  2 دوشنبه 08:00 10:00")
+            lines.append("\nیا skip اگه الان نداری (هر ۱۰ دقیقه چک می‌شه)")
+            return "\n".join(lines)
 
-        append_user_log(cid, f"📚 {len(selected)} کلاس تنظیم شد ({main_count} فراروم, {nima_count} نیما)")
+        _onboarding.pop(cid, None)
+        return _finish_setup(cid, selected, on_register)
 
-        if on_register:
-            on_register(cid)
+    # Step 6: Nima class time windows
+    if step == "nima_schedule":
+        selected = st.get("selected", [])
+        nima_selected = [c for c in selected if c["lms"] == "nima"]
+        t = text.strip().lower()
 
-        return "\n".join(lines)
+        if t != "skip":
+            for line in text.strip().splitlines():
+                idx, days, start, end = _parse_nima_schedule_line(line)
+                if idx is not None and 0 <= idx < len(nima_selected) and days and start:
+                    users.set_schedule(cid, "", days, start, end,
+                                       class_name=nima_selected[idx]["name"])
+
+        _onboarding.pop(cid, None)
+        return _finish_setup(cid, selected, on_register)
 
     # Fallback
     _onboarding.pop(cid, None)
