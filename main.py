@@ -158,9 +158,7 @@ def cmd_bot_setup():
 def cmd_show_tokens():
     import users
     tokens = sorted(users.VALID_TOKENS)
-    # Check which are still available
-    data = users._load()
-    invites = data.get("invites", {})
+    invites = users._load_invites()
     logger.info(f"Hardcoded invite tokens ({len(tokens)} total):")
     for t in tokens:
         inv = invites.get(t, {})
@@ -200,10 +198,8 @@ def cmd_dry_run():
 
 
 def _show_token_status():
-    """Show hardcoded token availability on startup."""
     import users
-    data = users._load()
-    invites = data.get("invites", {})
+    invites = users._load_invites()
     available = sum(1 for t in users.VALID_TOKENS if not invites.get(t, {}).get("used_by"))
     logger.info(f"Invite tokens: {available}/{len(users.VALID_TOKENS)} available")
 

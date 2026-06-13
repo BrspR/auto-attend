@@ -396,6 +396,13 @@ async def _handle_onboarding(cid: str, text: str, msg_id, on_register) -> str:
         users.set_classes(cid, selected)
         _onboarding.pop(cid, None)
 
+        # Scrape schedule times in the background — user doesn't wait for this
+        main_cls = [c for c in selected if c.get("lms") == "main" and c.get("url")]
+        if main_cls:
+            creds = users.get_credentials(cid)
+            if creds:
+                asyncio.create_task(_scrape_schedules_bg(cid, creds[0], creds[1], main_cls))
+
         main_count = sum(1 for c in selected if c["lms"] == "main")
         nima_count = sum(1 for c in selected if c["lms"] == "nima")
         lines = [f"✅ تنظیم تمام شد! {len(selected)} کلاس ذخیره شد:"]
@@ -416,6 +423,36 @@ async def _handle_onboarding(cid: str, text: str, msg_id, on_register) -> str:
     # Fallback
     _onboarding.pop(cid, None)
     return HELP_UNAUTHED
+
+
+async def _scrape_schedules_bg(cid: str, username: str, password: str, classes: list[dict]):
+    """Background task: visit each myLesson page, scrape زمان برگزاری, save to user file."""
+    from lms_main import LMSMain
+    lms = LMSMain(username, password)
+    try:
+        await lms.start()
+        updated = await lms.scrape_class_schedules(classes)
+        found = 0
+        for cls in updated:
+            if cls.get("days") is not None:
+                users.set_schedule(cid, cls["url"], cls["days"], cls.get("start"), cls.get("end"))
+                found += 1
+        total = len(classes)
+        if found:
+            unscheduled = total - found
+            msg = f"📅 زمان‌بندی {found} از {total} کلاس ذخیره شد."
+            if unscheduled:
+                msg += f"\n{unscheduled} کلاس بدون زمان ثابت هر نیم ساعت (روی ۰۰ و ۳۰) چک می‌شن."
+            await _send(cid, msg)
+        else:
+            await _send(cid, f"⚠️ زمان‌بندی پیدا نشد ({total} کلاس) — هر نیم ساعت روی وقت تمیز چک می‌کنم.")
+    except Exception as e:
+        logger.warning(f"[commands] schedule scrape bg error for {cid}: {e}")
+    finally:
+        try:
+            await lms.stop()
+        except Exception:
+            pass
 
 
 async def _send(cid: str, text: str):

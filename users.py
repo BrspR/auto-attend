@@ -1,13 +1,18 @@
 """
-Encrypted multi-user store + invite tokens for the shared attendance bot.
+Encrypted per-user credential store + invite tokens for the shared attendance bot.
+
+Each user's data lives in its own file  user_data/<chat_id>.json, isolated from
+every other user. The worker for user A only ever reads/writes user A's file —
+no shared mutable state between users.
+
+Invite-token redemption tracking stays in users.json (invites key only).
+
+Migration: on first import, any users nested inside a legacy users.json are
+moved into user_data/ automatically.
 
 Passwords are encrypted at rest with a dependency-free stdlib construction:
 scrypt KDF → HMAC-SHA256 keystream (counter mode) → encrypt-then-MAC. The master
 key lives in a separate 0600 file (.users_key) outside the repo.
-
-Honest caveat: the key is co-located with the data, so this protects a leaked or
-backed-up users.json, NOT a full server compromise (an attacker who owns the box
-gets both). There's no way around that — the bot must decrypt to log in.
 """
 import base64
 import hashlib
@@ -21,12 +26,15 @@ from dotenv import load_dotenv
 
 BASE = Path(__file__).parent
 load_dotenv(BASE / ".env")
-USERS_FILE = BASE / "users.json"
-KEY_FILE = BASE / ".users_key"
-MAX_USERS = 15
+
+INVITES_FILE = BASE / "users.json"   # invite redemption tracking only
+USER_DIR     = BASE / "user_data"    # one JSON file per registered user
+KEY_FILE     = BASE / ".users_key"
+MAX_USERS    = 15
 
 
-# ---------------- encryption (stdlib only) ----------------
+# ── encryption (stdlib only) ──────────────────────────────────────────────────
+
 def _master() -> bytes:
     if KEY_FILE.exists():
         return KEY_FILE.read_bytes()
@@ -48,7 +56,7 @@ def _keystream(enc_key: bytes, nonce: bytes, n: int) -> bytes:
 def encrypt(plaintext: str) -> str:
     salt = secrets.token_bytes(16)
     nonce = secrets.token_bytes(16)
-    dk = hashlib.scrypt(_master(), salt=salt, n=2 ** 14, r=8, p=1, dklen=64)
+    dk = hashlib.scrypt(_master(), salt=salt, n=2**14, r=8, p=1, dklen=64)
     enc_key, mac_key = dk[:32], dk[32:]
     data = plaintext.encode()
     ct = bytes(a ^ b for a, b in zip(data, _keystream(enc_key, nonce, len(data))))
@@ -59,87 +67,129 @@ def encrypt(plaintext: str) -> str:
 def decrypt(token: str) -> str:
     raw = base64.b64decode(token)
     salt, nonce, tag, ct = raw[:16], raw[16:32], raw[32:64], raw[64:]
-    dk = hashlib.scrypt(_master(), salt=salt, n=2 ** 14, r=8, p=1, dklen=64)
+    dk = hashlib.scrypt(_master(), salt=salt, n=2**14, r=8, p=1, dklen=64)
     enc_key, mac_key = dk[:32], dk[32:]
     if not hmac.compare_digest(tag, hmac.new(mac_key, salt + nonce + ct, "sha256").digest()):
         raise ValueError("tampered or wrong key")
     return bytes(a ^ b for a, b in zip(ct, _keystream(enc_key, nonce, len(ct)))).decode()
 
 
-# ---------------- store ----------------
-def _load() -> dict:
-    if USERS_FILE.exists():
-        return json.loads(USERS_FILE.read_text(encoding="utf-8"))
-    return {"invites": {}, "users": {}}
+# ── per-user file I/O ─────────────────────────────────────────────────────────
+
+def _user_file(chat_id) -> Path:
+    USER_DIR.mkdir(exist_ok=True)
+    return USER_DIR / f"{str(chat_id)}.json"
 
 
-def _save(data: dict):
-    # Atomic write: a crash mid-write must never corrupt the credential store.
-    tmp = USERS_FILE.with_name(USERS_FILE.name + ".tmp")
+def _load_user(chat_id) -> dict | None:
+    p = _user_file(chat_id)
+    if not p.exists():
+        return None
+    return json.loads(p.read_text(encoding="utf-8"))
+
+
+def _save_user(chat_id, data: dict):
+    USER_DIR.mkdir(exist_ok=True)
+    p = _user_file(chat_id)
+    tmp = p.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     os.chmod(tmp, 0o600)
-    os.replace(tmp, USERS_FILE)
+    os.replace(tmp, p)
 
 
-# ---------------- invite tokens loaded from .env ----------------
-# Read from gitignored .env file to keep them secure and hidden from git.
+# ── invite file I/O ───────────────────────────────────────────────────────────
+
+def _load_invites() -> dict:
+    if INVITES_FILE.exists():
+        raw = json.loads(INVITES_FILE.read_text(encoding="utf-8"))
+        return raw.get("invites", {})
+    return {}
+
+
+def _save_invites(invites: dict):
+    tmp = INVITES_FILE.with_suffix(".tmp")
+    tmp.write_text(
+        json.dumps({"invites": invites}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    os.replace(tmp, INVITES_FILE)
+
+
+# ── one-time migration from legacy single-file format ────────────────────────
+
+def _migrate_legacy():
+    if not INVITES_FILE.exists():
+        return
+    raw = json.loads(INVITES_FILE.read_text(encoding="utf-8"))
+    legacy_users = raw.get("users", {})
+    if not legacy_users:
+        return
+    USER_DIR.mkdir(exist_ok=True)
+    for cid, u in legacy_users.items():
+        if not _user_file(cid).exists():
+            _save_user(cid, u)
+    _save_invites(raw.get("invites", {}))
+
+
+_migrate_legacy()
+
+
+# ── invite tokens loaded from .env ───────────────────────────────────────────
+
 _env_tokens = os.getenv("INVITE_TOKENS", "")
 VALID_TOKENS = frozenset([t.strip() for t in _env_tokens.split(",") if t.strip()])
 
 
 def gen_invites(n: int = 0) -> list:
-    """Return the hardcoded tokens (ignores n). For display only."""
     return sorted(VALID_TOKENS)
 
 
 def invite_open(token: str) -> bool:
-    """True if the token is one of the hardcoded 15 AND hasn't been redeemed yet."""
     if token not in VALID_TOKENS:
         return False
-    inv = _load().get("invites", {}).get(token)
-    if inv and inv.get("used_by") is not None:
-        return False  # already used
-    return True
+    inv = _load_invites().get(token)
+    return not (inv and inv.get("used_by") is not None)
 
 
 def redeem_invite(token: str, chat_id) -> bool:
-    """Mark a hardcoded token as used by a chat_id."""
     if token not in VALID_TOKENS:
         return False
-    data = _load()
-    invites = data.setdefault("invites", {})
+    invites = _load_invites()
     inv = invites.get(token, {})
     if inv.get("used_by") is not None:
         return False
     invites[token] = {"used_by": str(chat_id), "created": time.time()}
-    _save(data)
+    _save_invites(invites)
     return True
 
 
-# ---------------- users ----------------
+# ── user CRUD ─────────────────────────────────────────────────────────────────
+
 def count() -> int:
-    return len(_load()["users"])
+    if not USER_DIR.exists():
+        return 0
+    return sum(1 for f in USER_DIR.glob("*.json") if not f.name.endswith(".tmp"))
 
 
-def add_user(chat_id, username: str, password: str) -> bool:
-    data = _load()
+def add_user(chat_id, username: str, password: str, invite_token: str = "") -> bool:
     cid = str(chat_id)
-    if len(data["users"]) >= MAX_USERS and cid not in data["users"]:
+    if not _user_file(cid).exists() and count() >= MAX_USERS:
         return False
-    data["users"][cid] = {
+    _save_user(cid, {
+        "chat_id": cid,
+        "invite_token": invite_token,
         "username": username,
         "password_enc": encrypt(password),
         "enabled": True,
         "joined": time.time(),
-        "classes": [],          # [{name, url, lms}] — filled during setup
-        "setup_done": False,    # True after user picks their classes
-    }
-    _save(data)
+        "classes": [],
+        "setup_done": False,
+    })
     return True
 
 
-def get_user(chat_id):
-    return _load()["users"].get(str(chat_id))
+def get_user(chat_id) -> dict | None:
+    return _load_user(chat_id)
 
 
 def get_credentials(chat_id):
@@ -150,19 +200,30 @@ def get_credentials(chat_id):
 
 
 def get_classes(chat_id) -> list:
-    """Return the user's selected classes: [{name, url, lms}]."""
     u = get_user(chat_id)
     return (u or {}).get("classes", [])
 
 
 def set_classes(chat_id, classes: list):
-    """Save the user's class selection."""
-    data = _load()
-    cid = str(chat_id)
-    if cid in data["users"]:
-        data["users"][cid]["classes"] = classes
-        data["users"][cid]["setup_done"] = True
-        _save(data)
+    u = _load_user(chat_id)
+    if u:
+        u["classes"] = classes
+        u["setup_done"] = True
+        _save_user(chat_id, u)
+
+
+def set_schedule(chat_id, class_url: str, days: list, start: str | None, end: str | None):
+    """Patch schedule fields onto one class entry — called after scraping."""
+    u = _load_user(chat_id)
+    if not u:
+        return
+    for cls in u.get("classes", []):
+        if cls.get("url") == class_url:
+            cls["days"] = days
+            cls["start"] = start
+            cls["end"] = end
+            break
+    _save_user(chat_id, u)
 
 
 def is_setup_done(chat_id) -> bool:
@@ -171,23 +232,32 @@ def is_setup_done(chat_id) -> bool:
 
 
 def all_users() -> dict:
-    return _load()["users"]
+    """Return {chat_id: user_data} for every file in user_data/."""
+    result = {}
+    if not USER_DIR.exists():
+        return result
+    for f in USER_DIR.glob("*.json"):
+        if f.name.endswith(".tmp"):
+            continue
+        try:
+            result[f.stem] = json.loads(f.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return result
 
 
 def is_registered(chat_id) -> bool:
-    return str(chat_id) in _load()["users"]
+    return _user_file(chat_id).exists()
 
 
 def set_enabled(chat_id, on: bool):
-    data = _load()
-    cid = str(chat_id)
-    if cid in data["users"]:
-        data["users"][cid]["enabled"] = bool(on)
-        _save(data)
+    u = _load_user(chat_id)
+    if u:
+        u["enabled"] = bool(on)
+        _save_user(chat_id, u)
 
 
 def remove_user(chat_id):
-    data = _load()
-    data["users"].pop(str(chat_id), None)
-    _save(data)
-
+    p = _user_file(chat_id)
+    if p.exists():
+        p.unlink()

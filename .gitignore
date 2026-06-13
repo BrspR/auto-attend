@@ -4,6 +4,7 @@ config.py
 
 # multi-user store + encryption key — never commit these
 users.json
+user_data/
 .users_key
 
 # browser cache and session data

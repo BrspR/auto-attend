@@ -28,6 +28,41 @@ CHROMIUM_ARGS = [
 ]
 
 
+def _parse_schedule(page_text: str) -> dict | None:
+    """Extract schedule from text containing 'زمان برگزاری'.
+    Returns {days:[int,...], start:'HH:MM', end:'HH:MM'} or None.
+    Python weekday: Mon=0 Tue=1 Wed=2 Thu=3 Fri=4 Sat=5 Sun=6."""
+    import re
+    idx = page_text.find("زمان برگزاری")
+    if idx == -1:
+        return None
+    snippet = page_text[idx: idx + 150]
+    for p, l in zip("۰۱۲۳۴۵۶۷۸۹", "0123456789"):
+        snippet = snippet.replace(p, l)
+    for z in ("‌", "‍", "‎", "‏"):
+        snippet = snippet.replace(z, " ")
+    snippet = " ".join(snippet.split())
+    # Longer names first so 'شنبه' doesn't absorb 'یکشنبه' etc.
+    DAY_MAP = [
+        ("یکشنبه", 6), ("دوشنبه", 0), ("سه شنبه", 1),
+        ("چهارشنبه", 2), ("پنجشنبه", 3), ("جمعه", 4),
+        ("شنبه", 5),
+    ]
+    days, work = [], snippet
+    for name, num in DAY_MAP:
+        if name in work:
+            days.append(num)
+            work = work.replace(name, "", 1)
+    times = re.findall(r"\b\d{1,2}:\d{2}\b", snippet)
+    if not days and not times:
+        return None
+    return {
+        "days":  sorted(set(days)),
+        "start": times[0] if times else None,
+        "end":   times[1] if len(times) >= 2 else None,
+    }
+
+
 def _norm(s: str) -> str:
     """
     Normalize Persian text for keyword matching. The LMS renders class names with
@@ -286,6 +321,40 @@ class LMSMain:
             return out
         finally:
             await ctx.close()
+
+    async def scrape_class_schedules(self, lessons: list[dict]) -> list[dict]:
+        """Visit each myLesson page once (shared login) and extract زمان برگزاری.
+        Returns a copy of lessons with days/start/end added where found."""
+        result = []
+        ctx, page = await self._new_page()
+        try:
+            if not await self._login_page(page):
+                return lessons
+            for lesson in lessons:
+                updated = dict(lesson)
+                if lesson.get("lms") != "main" or not lesson.get("url"):
+                    result.append(updated)
+                    continue
+                try:
+                    await page.goto(lesson["url"], wait_until="domcontentloaded",
+                                    timeout=self._t(20000))
+                    await page.wait_for_timeout(1000)
+                    text = await page.evaluate("() => document.body.innerText")
+                    sched = _parse_schedule(text)
+                    if sched:
+                        updated.update(sched)
+                        logger.info(
+                            f"[{lesson['name']}] schedule scraped: "
+                            f"days={sched['days']} {sched['start']}–{sched['end']}"
+                        )
+                    else:
+                        logger.warning(f"[{lesson['name']}] زمان برگزاری not found on page")
+                except Exception as e:
+                    logger.warning(f"[{lesson['name']}] schedule scrape error: {e}")
+                result.append(updated)
+        finally:
+            await ctx.close()
+        return result
 
     async def check_live_many(self, lessons: list[dict]) -> dict[str, bool]:
         """Check several lessons ({name, url}) with ONE login/context.

@@ -18,7 +18,7 @@ dumps capture the real DOM for fixing selectors.
 import asyncio
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import config
 import notify
@@ -63,16 +63,80 @@ class UserWorker:
         return task
 
     def _load_classes(self):
-        """Load this user's selected classes from users.json."""
+        """Reload this user's classes from their own user_data/<chat_id>.json."""
         cls_list = users.get_classes(self.chat_id)
         self.main_classes = [
-            {"name": c["name"], "url": c["url"]}
+            {
+                "name":  c["name"],
+                "url":   c["url"],
+                "days":  c.get("days"),
+                "start": c.get("start"),
+                "end":   c.get("end"),
+            }
             for c in cls_list if c.get("lms") == "main" and c.get("url")
         ]
         self.nima_classes = [
             {"name": c["name"]}
             for c in cls_list if c.get("lms") == "nima"
         ]
+
+    def _next_half_hour_secs(self) -> float:
+        """Seconds until the next :00 or :30 mark in Tehran time (min 60s)."""
+        now = datetime.now(tz=config.TIMEZONE)
+        if now.minute < 30:
+            target = now.replace(minute=30, second=0, microsecond=0)
+        else:
+            target = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+        return max((target - now).total_seconds(), 60)
+
+    def _sleep_until_next(self) -> float:
+        """Return seconds to sleep before the next useful check.
+
+        Classes with full schedule: sleep until 2 min before next class window.
+        Fallback (unscheduled classes or Nima): sleep until next :00 or :30
+        mark in Tehran time — checks happen on the half-hour, not by interval.
+        """
+        has_all = (
+            not self.nima_classes
+            and self.main_classes
+            and all(c.get("days") and c.get("start") for c in self.main_classes)
+        )
+        if not has_all:
+            return self._next_half_hour_secs()
+
+        now = datetime.now(tz=config.TIMEZONE)
+
+        # Inside a class window → keep checking every 6 min
+        for cls in self.main_classes:
+            if now.weekday() not in cls["days"]:
+                continue
+            sh, sm = map(int, cls["start"].split(":"))
+            end_str = cls.get("end") or f"{sh+2}:{sm:02d}"
+            eh, em = map(int, end_str.split(":"))
+            window_start = now.replace(hour=sh, minute=sm, second=0, microsecond=0) - timedelta(minutes=2)
+            window_end   = now.replace(hour=eh, minute=em, second=0, microsecond=0) + timedelta(minutes=10)
+            if window_start <= now <= window_end:
+                return CHECK_INTERVAL
+
+        # Find next upcoming class across the week
+        soonest = None
+        for cls in self.main_classes:
+            sh, sm = map(int, cls["start"].split(":"))
+            for offset in range(1, 8):
+                candidate_day = (now.weekday() + offset) % 7
+                if candidate_day not in cls["days"]:
+                    continue
+                target = (now + timedelta(days=offset)).replace(
+                    hour=sh, minute=sm, second=0, microsecond=0)
+                wait = (target - now).total_seconds() - 120
+                if soonest is None or wait < soonest:
+                    soonest = wait
+                break
+
+        half = self._next_half_hour_secs()
+        if soonest and soonest > half:
+            return min(soonest, 3600)
+        return half
 
     # ---- one Fararoom + Nima sweep ----
     async def _check_cycle(self):
@@ -110,7 +174,7 @@ class UserWorker:
                         attended = await nima.attend_class(nima_name, [nima_name])
                     except Exception as e:
                         logger.warning(f"[user {self.chat_id}] nima check {nima_name} error: {e}")
-                    if attended:
+                    if attended and self.running:
                         self.nima_held[nima_name] = time.time() + HOLD_SECS
                         state.set_status(nima_name, "attended", chat_id=self.chat_id)
                         append_user_log(self.chat_id, f"✅ حاضری نیما ثبت شد: {nima_name}")
@@ -141,6 +205,9 @@ class UserWorker:
                     self.held.pop(url, None)  # let the next check cycle retry
                     state.set_status(name, "failed", chat_id=self.chat_id)
                     append_user_log(self.chat_id, f"⚠️ ورود به {name} نشد — دوباره تلاش می‌کنم")
+                    return
+                if not self.running:
+                    self.held.pop(url, None)
                     return
                 state.set_status(name, "attended", chat_id=self.chat_id)
                 append_user_log(self.chat_id, f"✅ حاضری ثبت شد: {name}")
@@ -194,10 +261,13 @@ class UserWorker:
         append_user_log(self.chat_id, f"🟢 ربات روشن شد — {total} کلاس")
 
         while self.running:
+            # Reload from user_data/<chat_id>.json each cycle so freshly scraped
+            # schedules are picked up without restarting the worker.
+            self._load_classes()
             now = datetime.now(tz=config.TIMEZONE)
             if DAY_START_HOUR <= now.hour < DAY_END_HOUR:
                 try:
                     await self._check_cycle()
                 except Exception as e:
                     logger.warning(f"[user {self.chat_id}] check cycle error: {e}")
-            await asyncio.sleep(CHECK_INTERVAL)
+            await asyncio.sleep(self._sleep_until_next())
