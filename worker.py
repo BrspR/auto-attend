@@ -30,7 +30,7 @@ from lms_nima import LMSNima
 
 logger = logging.getLogger(__name__)
 
-CHECK_INTERVAL = 360          # seconds between live-session checks per user
+CHECK_INTERVAL = 600          # seconds between live-session checks per user (10 min)
 DAY_START_HOUR = 7
 DAY_END_HOUR = 22
 HOLD_SECS = config.MAX_STAY_MINUTES * 60
@@ -80,21 +80,11 @@ class UserWorker:
             for c in cls_list if c.get("lms") == "nima"
         ]
 
-    def _next_half_hour_secs(self) -> float:
-        """Seconds until the next :00 or :30 mark in Tehran time (min 60s)."""
-        now = datetime.now(tz=config.TIMEZONE)
-        if now.minute < 30:
-            target = now.replace(minute=30, second=0, microsecond=0)
-        else:
-            target = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
-        return max((target - now).total_seconds(), 60)
-
     def _sleep_until_next(self) -> float:
         """Return seconds to sleep before the next useful check.
 
-        Classes with full schedule: sleep until 2 min before next class window.
-        Fallback (unscheduled classes or Nima): sleep until next :00 or :30
-        mark in Tehran time — checks happen on the half-hour, not by interval.
+        Classes with full schedule: sleep until 2 min before next class window
+        (capped at 1 h). Fallback (unscheduled/Nima): CHECK_INTERVAL (10 min).
         """
         has_all = (
             not self.nima_classes
@@ -102,11 +92,11 @@ class UserWorker:
             and all(c.get("days") and c.get("start") for c in self.main_classes)
         )
         if not has_all:
-            return self._next_half_hour_secs()
+            return CHECK_INTERVAL
 
         now = datetime.now(tz=config.TIMEZONE)
 
-        # Inside a class window → keep checking every 6 min
+        # Inside a class window → keep checking at full rate
         for cls in self.main_classes:
             if now.weekday() not in cls["days"]:
                 continue
@@ -133,10 +123,9 @@ class UserWorker:
                     soonest = wait
                 break
 
-        half = self._next_half_hour_secs()
-        if soonest and soonest > half:
+        if soonest and soonest > CHECK_INTERVAL:
             return min(soonest, 3600)
-        return half
+        return CHECK_INTERVAL
 
     # ---- one Fararoom + Nima sweep ----
     async def _check_cycle(self):
