@@ -75,7 +75,7 @@ async def enter_room(page, label: str) -> bool:
         return False
 
 
-async def answer_poll_if_present(page, label: str, answered: set, dumped_flag: dict) -> bool:
+async def answer_poll_if_present(page, label: str, answered: set, dumped_flag: dict, chat_id: str = None) -> bool:
     """If a poll is live and unanswered, click the first option after a human delay."""
     try:
         container = page.locator(_POLL_CONTAINER).first
@@ -111,7 +111,7 @@ async def answer_poll_if_present(page, label: str, answered: set, dumped_flag: d
         await options.first.click()
         answered.add(fingerprint)
         logger.info(f"[BBB/{label}] ✓ Answered poll (option A)")
-        await notify.send_async(f"🗳️ به نظرسنجی «{label}» جواب داده شد (گزینه A)")
+        await notify.send_async(f"🗳️ به نظرسنجی «{label}» جواب داده شد (گزینه A)", chat_id=chat_id)
         return True
     except Exception as e:
         logger.warning(f"[BBB/{label}] poll click failed: {e}")
@@ -137,7 +137,7 @@ async def send_chat(page, label: str, text: str) -> bool:
         return False
 
 
-async def hold_with_presence(page, label: str, hold_until_ts: float, *, send_khaste: bool = True):
+async def hold_with_presence(page, label: str, hold_until_ts: float, *, chat_id: str = None, send_khaste: bool = True):
     """
     Stay in the BBB room until hold_until_ts: keep alive, auto-answer attendance
     polls, and post خسته نباشید ~2 min before the end.
@@ -157,7 +157,7 @@ async def hold_with_presence(page, label: str, hold_until_ts: float, *, send_kha
     try:
         shot = Path(__file__).parent / f"bbb_shot_{label.replace(' ', '_').replace('/', '_')[:20]}.png"
         await page.screenshot(path=str(shot))
-        await notify.send_photo_async(str(shot), caption=f"📸 وارد کلاس شد: {label}")
+        await notify.send_photo_async(str(shot), caption=f"📸 وارد کلاس شد: {label}", chat_id=chat_id)
     except Exception as e:
         logger.warning(f"[BBB/{label}] proof screenshot failed: {e}")
 
@@ -166,7 +166,7 @@ async def hold_with_presence(page, label: str, hold_until_ts: float, *, send_kha
 
     while time.time() < hold_until_ts:
         try:
-            await answer_poll_if_present(page, label, answered, dumped)
+            await answer_poll_if_present(page, label, answered, dumped, chat_id=chat_id)
         except Exception as e:
             logger.warning(f"[BBB/{label}] poll-check error: {e}")
 
@@ -216,7 +216,7 @@ async def hold_with_presence(page, label: str, hold_until_ts: float, *, send_kha
                 khaste_sent = await send_chat(page, label, KHASTE_TEXT)
                 if khaste_sent:
                     trigger_type = "زمان کلاس" if time_trigger else f"چت دیگران ({other_count} پیام)"
-                    await notify.send_async(f"💬 «خسته نباشید» در «{label}» ارسال شد (محرک: {trigger_type})")
+                    await notify.send_async(f"💬 «خسته نباشید» در «{label}» ارسال شد (محرک: {trigger_type})", chat_id=chat_id)
 
         sleep_for = min(POLL_CHECK_SECS, max(1.0, hold_until_ts - time.time()))
         await asyncio.sleep(sleep_for)

@@ -1,12 +1,14 @@
 import asyncio
 import json
 import logging
+import re
 import time
 from datetime import datetime
 from pathlib import Path
 from playwright.async_api import async_playwright, Playwright, Browser, BrowserContext, Page
 
 import bbb
+import config
 
 logger = logging.getLogger(__name__)
 
@@ -129,7 +131,8 @@ class LMSMain:
         page.set_default_navigation_timeout(self._t(40000))
         return ctx, page
 
-    async def _login_page(self, page: Page) -> bool:
+    async def _login_once(self, page: Page) -> bool:
+        """One SSO login attempt. Returns True only once /panel/ is actually reached."""
         await page.goto(f"{BASE_URL}/panel/home", wait_until="domcontentloaded")
 
         sso_btn = page.locator("a:has-text('ورود با سامانه یکپارچه')")
@@ -141,8 +144,7 @@ class LMSMain:
         try:
             # Navigate directly to the Moodle SSO redirection page to trigger the redirect chain
             await page.goto("https://courses.aut.ac.ir/login/index.php?authCASattras=CASattras", wait_until="commit", timeout=self._t(30000))
-            
-            import re
+
             await page.wait_for_url(re.compile(r".*cas/login.*"), timeout=self._t(45000))
             logger.info(f"SSO page reached: {page.url}")
 
@@ -151,10 +153,16 @@ class LMSMain:
             await user_input.fill(self.username)
             await page.locator("input[type='password']").first.fill(self.password)
             await page.locator("button[type='submit'], input[type='submit']").first.click(no_wait_after=True)
-            
-            # Wait for either panel (success) or cas/login (failure)
-            await page.wait_for_url(re.compile(r".*(panel|cas/login).*"), timeout=self._t(50000))
-            await page.wait_for_timeout(self._t(2000))
+
+            # Wait for the redirect to ACTUALLY land on /panel/. Matching
+            # "panel|cas/login" races — we are already ON cas/login when we click,
+            # so it returns instantly and reports a false FAILED. Wait for panel
+            # only; a genuine failure simply times out and the caller retries.
+            try:
+                await page.wait_for_url(re.compile(r".*panel.*"), timeout=self._t(20000))
+            except Exception:
+                pass
+            await page.wait_for_timeout(self._t(1500))
         except Exception as e:
             logger.error(f"Login error: {e}")
             return False
@@ -162,6 +170,35 @@ class LMSMain:
         success = "panel" in page.url
         logger.info(f"Login {'successful' if success else 'FAILED'} — URL: {page.url}")
         return success
+
+    async def _login_page(self, page: Page, deadline: float | None = None) -> bool:
+        """Log in via SSO, retrying until we are in. Each failed attempt multiplies
+        the timeout by config.TIMEOUT_GROWTH (1.5x, capped at MAX_TIMEOUT_SCALE).
+
+        deadline: a time.time() value (e.g. the class end). When given, there is
+        NO cap on attempts — we keep logging in, growing the timeout 1.5x each
+        time, until we are in or the deadline passes. This is the join path:
+        "every time you fail to join the BBB, log in again, 1.5x the wait." When
+        None (routine 10-min liveness check) we do a single attempt so the sweep
+        cannot hang — the next 10-min cycle is the retry.
+        """
+        attempt = 0
+        while True:
+            attempt += 1
+            if await self._login_once(page):
+                self.timeout_scale = 1.0   # reset for subsequent page ops
+                return True
+            self.timeout_scale = min(
+                config.MAX_TIMEOUT_SCALE,
+                self.timeout_scale * config.TIMEOUT_GROWTH,
+            )
+            if deadline is None:
+                return False
+            if time.time() >= deadline:
+                logger.warning(f"[login] gave up after {attempt} attempts — class deadline passed")
+                return False
+            logger.info(f"[login] attempt {attempt} failed — retrying with timeout x{self.timeout_scale:.2f}")
+            await asyncio.sleep(3)
 
     async def _join_bbb_session(self, page: Page, class_name: str) -> str | None:
         """
@@ -171,39 +208,97 @@ class LMSMain:
           روز | تاریخ | ساعت شروع | ساعت پایان | مدرس | نوع جلسه | وضعیت جلسه | لینک ورود
 
         When a session is live ("در حال برگزاری"), the لینک ورود column contains
-        a green button labelled "ورود به جلسه بیگبلوباتن" whose href is the BBB URL
-        (typically starts with blue3...).
+        a green button labelled "ورود به جلسه بیگبلوباتن".
 
-        Fallback: submit <form action="https://lmshome.aut.ac.ir/join"> if present.
+        The button is a <button type="submit" class="btn btn-success"> inside
+        <form action="https://lmshome.aut.ac.ir/join" method="POST"> with hidden
+        fields (_token, room_id, service, scheduleNo).  Clicking submit joins BBB.
         """
-        await page.wait_for_timeout(1500)
+        # Comprehensive selector covering all known BBB join button variations
+        _join_sel = (
+            "form[action*='/join'], "
+            "button.btn-success, a.btn-success, "
+            "button:has-text('ورود به جلسه'), a:has-text('ورود به جلسه'), "
+            "button:has-text('بیگبلوباتن'), a:has-text('بیگبلوباتن'), "
+            "a[href*='blue3'], a[href*='bigbluebutton'], "
+            "button:has-text('ورود'), a:has-text('ورود')"
+        )
+        # Wait for the join form/button to appear — the session table may load
+        # asynchronously via AJAX after domcontentloaded fires.
+        try:
+            await page.wait_for_selector(_join_sel, timeout=15000)
+            logger.info(f"[{class_name}] Join element appeared on page")
+        except Exception:
+            # Selector didn't appear within 15s — fall through and check anyway
+            logger.info(f"[{class_name}] Join selector not found within 15s, checking DOM anyway")
+        await page.wait_for_timeout(1000)  # settle time after element appears
 
-        # Primary: green join button in the لینک ورود column
-        join_btn = page.locator(
-            "a:has-text('ورود به جلسه')"
-            ", a:has-text('بیگبلوباتن')"
-            ", a.btn-success"
-            ", a[href*='blue3']"
-            ", a[href*='bigbluebutton']"
+        # ---- Strategy 1: form POST to /join (the actual DOM structure) ----
+        join_form = page.locator("form[action*='/join']").first
+        if await join_form.count() > 0:
+            submit = join_form.locator("button[type='submit'], input[type='submit']").first
+            if await submit.count() > 0:
+                logger.info(f"[{class_name}] Found form[action*/join] with submit button — clicking")
+                await submit.click(no_wait_after=True)
+                await page.wait_for_load_state("domcontentloaded", timeout=25000)
+                logger.info(f"[{class_name}] ✓ Joined via form POST! Now at: {page.url}")
+                return page.url
+
+        # ---- Strategy 2: green btn-success button (any tag) ----
+        green_btn = page.locator(
+            "button.btn-success:has-text('ورود'), a.btn-success:has-text('ورود'), "
+            "button:has-text('ورود به جلسه'), a:has-text('ورود به جلسه'), "
+            "button:has-text('بیگبلوباتن'), a:has-text('بیگبلوباتن')"
         ).first
+        if await green_btn.count() > 0:
+            tag = await green_btn.evaluate("el => el.tagName")
+            if tag == "A":
+                bbb_href = await green_btn.get_attribute("href") or ""
+                logger.info(f"[{class_name}] BBB <a> link found: {bbb_href[:120]}")
+                target = bbb_href if bbb_href.startswith("http") else f"{BASE_URL}{bbb_href}"
+                await page.goto(target, wait_until="domcontentloaded", timeout=25000)
+            else:
+                logger.info(f"[{class_name}] Green join <button> found — clicking")
+                await green_btn.click(no_wait_after=True)
+                await page.wait_for_load_state("domcontentloaded", timeout=25000)
+            logger.info(f"[{class_name}] ✓ Joined BBB! Now at: {page.url}")
+            return page.url
 
-        if await join_btn.count() > 0:
-            bbb_href = await join_btn.get_attribute("href") or ""
-            logger.info(f"[{class_name}] BBB link found: {bbb_href[:120]}")
+        # ---- Strategy 3: direct BBB href (legacy fallback) ----
+        bbb_link = page.locator(
+            "a[href*='blue3'], a[href*='bigbluebutton']"
+        ).first
+        if await bbb_link.count() > 0:
+            bbb_href = await bbb_link.get_attribute("href") or ""
+            logger.info(f"[{class_name}] Direct BBB link: {bbb_href[:120]}")
             target = bbb_href if bbb_href.startswith("http") else f"{BASE_URL}{bbb_href}"
             await page.goto(target, wait_until="domcontentloaded", timeout=25000)
             logger.info(f"[{class_name}] ✓ Joined BBB! Now at: {page.url}")
             return page.url
 
-        # Fallback: form-based join
-        join_form = page.locator("form[action*='/join']").first
-        if await join_form.count() > 0:
-            submit = join_form.locator("button[type='submit'], input[type='submit']").first
-            if await submit.count() > 0:
-                await submit.click(no_wait_after=True)
-                await page.wait_for_load_state("domcontentloaded", timeout=25000)
-                logger.info(f"[{class_name}] ✓ Joined via form! Now at: {page.url}")
-                return page.url
+        # ---- Strategy 4: check for "در حال برگزاری" status text, then find nearby button ----
+        try:
+            status_cell = page.locator("text=در حال برگزاری").first
+            if await status_cell.count() > 0:
+                # Session is live — find the closest button/link in the same table row
+                row = status_cell.locator("xpath=ancestor::tr").first
+                if await row.count() > 0:
+                    row_btn = row.locator("button, a[href]").last
+                    if await row_btn.count() > 0:
+                        tag = await row_btn.evaluate("el => el.tagName")
+                        if tag == "A":
+                            href = await row_btn.get_attribute("href") or ""
+                            target = href if href.startswith("http") else f"{BASE_URL}{href}"
+                            logger.info(f"[{class_name}] Found row button via 'در حال برگزاری' — navigating: {target[:120]}")
+                            await page.goto(target, wait_until="domcontentloaded", timeout=25000)
+                        else:
+                            logger.info(f"[{class_name}] Found row button via 'در حال برگزاری' — clicking")
+                            await row_btn.click(no_wait_after=True)
+                            await page.wait_for_load_state("domcontentloaded", timeout=25000)
+                        logger.info(f"[{class_name}] ✓ Joined BBB via status row! Now at: {page.url}")
+                        return page.url
+        except Exception as e:
+            logger.warning(f"[{class_name}] Strategy 4 (status text) failed: {e}")
 
         logger.warning(f"[{class_name}] No join button or form found — session not live yet")
         return None
@@ -372,12 +467,18 @@ class LMSMain:
                 url = lesson["url"]
                 try:
                     await page.goto(url, wait_until="domcontentloaded", timeout=self._t(30000))
-                    await page.wait_for_timeout(1500)
-                    btn = page.locator(
-                        "a:has-text('ورود به جلسه'), a:has-text('بیگبلوباتن'), "
-                        "a.btn-success, a[href*='blue3'], a[href*='bigbluebutton'], form[action*='/join']"
+                    _live_sel = (
+                        "form[action*='/join'], "
+                        "button.btn-success:has-text('ورود'), a.btn-success:has-text('ورود'), "
+                        "button:has-text('ورود به جلسه'), a:has-text('ورود به جلسه'), "
+                        "button:has-text('بیگبلوباتن'), a:has-text('بیگبلوباتن'), "
+                        "a[href*='blue3'], a[href*='bigbluebutton']"
                     )
-                    out[url] = await btn.count() > 0
+                    try:
+                        await page.wait_for_selector(_live_sel, timeout=8000)
+                        out[url] = True
+                    except Exception:
+                        out[url] = False
                 except Exception as e:
                     logger.warning(f"[{lesson.get('name', url)}] live-check error: {e}")
                     out[url] = False
@@ -392,19 +493,30 @@ class LMSMain:
             if not await self._login_page(page):
                 return False
             await page.goto(lesson_url, wait_until="domcontentloaded", timeout=self._t(30000))
-            await page.wait_for_timeout(1500)
-            btn = page.locator(
-                "a:has-text('ورود به جلسه'), a:has-text('بیگبلوباتن'), "
-                "a.btn-success, a[href*='blue3'], a[href*='bigbluebutton'], form[action*='/join']"
+            _live_sel = (
+                "form[action*='/join'], "
+                "button.btn-success:has-text('ورود'), a.btn-success:has-text('ورود'), "
+                "button:has-text('ورود به جلسه'), a:has-text('ورود به جلسه'), "
+                "button:has-text('بیگبلوباتن'), a:has-text('بیگبلوباتن'), "
+                "a[href*='blue3'], a[href*='bigbluebutton']"
             )
-            return await btn.count() > 0
+            try:
+                await page.wait_for_selector(_live_sel, timeout=8000)
+                return True
+            except Exception:
+                return False
         except Exception:
             return False
         finally:
             await ctx.close()
 
-    async def attend_class(self, class_name: str, keywords: list[str], lesson_url: str | None = None) -> bool:
-        """Click the BBB join button to register attendance. Returns True on success."""
+    async def attend_class(self, class_name: str, keywords: list[str], lesson_url: str | None = None,
+                           deadline: float | None = None) -> bool:
+        """Click the BBB join button to register attendance. Returns True on success.
+
+        Retries up to 4 times with page reloads between attempts.
+        deadline (time.time() value, e.g. class end): keep re-logging-in with a
+        1.5x-growing timeout until we are in or the deadline passes."""
         cache = _load_cache()
         lesson_url = lesson_url or cache.get(class_name)
         if not lesson_url:
@@ -412,19 +524,32 @@ class LMSMain:
             return False
 
         logger.info(f"[{class_name}] Navigating to lesson page: {lesson_url}")
+        MAX_JOIN_ATTEMPTS = 4
 
         ctx, page = await self._new_page()
         try:
-            if not await self._login_page(page):
+            if not await self._login_page(page, deadline=deadline):
                 return False
 
-            await page.goto(lesson_url, wait_until="domcontentloaded", timeout=self._t(30000))
-            bbb_url = await self._join_bbb_session(page, class_name)
+            for attempt in range(1, MAX_JOIN_ATTEMPTS + 1):
+                logger.info(f"[{class_name}] Join attempt {attempt}/{MAX_JOIN_ATTEMPTS}")
+                try:
+                    await page.goto(lesson_url, wait_until="domcontentloaded", timeout=self._t(30000))
+                    await page.wait_for_timeout(1500)  # let AJAX table render
+                    bbb_url = await self._join_bbb_session(page, class_name)
+                    if bbb_url:
+                        logger.info(f"[{class_name}] ✓ Joined on attempt {attempt}/{MAX_JOIN_ATTEMPTS}")
+                        return True
+                except Exception as e:
+                    logger.warning(f"[{class_name}] Join attempt {attempt} error: {e}")
 
-            if not bbb_url:
-                logger.warning(f"[{class_name}] No live BBB session found — professor hasn't started yet")
+                if attempt < MAX_JOIN_ATTEMPTS:
+                    wait_secs = 5 + attempt * 3  # 8s, 11s, 14s between retries
+                    logger.info(f"[{class_name}] Button not found — retrying in {wait_secs}s (attempt {attempt}/{MAX_JOIN_ATTEMPTS})")
+                    await asyncio.sleep(wait_secs)
 
-            return bbb_url is not None
+            logger.warning(f"[{class_name}] No live BBB session found after {MAX_JOIN_ATTEMPTS} attempts — professor hasn't started yet")
+            return False
         except Exception as e:
             logger.error(f"[{class_name}] Error: {e}")
             return False
@@ -438,8 +563,13 @@ class LMSMain:
         class_url: str | None,
         hold_until_ts: float,
         keepalive_interval: int = 600,
+        chat_id: str = None,
     ):
-        """Join the BBB session and stay on the page until hold_until_ts."""
+        """Join the BBB session and stay on the page until hold_until_ts.
+        
+        chat_id: explicit Bale chat ID so notifications route to the correct user.
+        Retries up to 4 times with page reloads between attempts.
+        """
         cache = _load_cache()
         lesson_url = class_url or cache.get(class_name)
         if not lesson_url:
@@ -447,19 +577,35 @@ class LMSMain:
             return
 
         logger.info(f"[{class_name}] Navigating to lesson page: {lesson_url}")
+        MAX_JOIN_ATTEMPTS = 4
         ctx, page = await self._new_page()
         try:
-            if not await self._login_page(page):
+            if not await self._login_page(page, deadline=hold_until_ts):
                 return
 
-            await page.goto(lesson_url, wait_until="domcontentloaded", timeout=self._t(30000))
-            bbb_url = await self._join_bbb_session(page, class_name)
+            bbb_url = None
+            for attempt in range(1, MAX_JOIN_ATTEMPTS + 1):
+                logger.info(f"[{class_name}] Hold-join attempt {attempt}/{MAX_JOIN_ATTEMPTS}")
+                try:
+                    await page.goto(lesson_url, wait_until="domcontentloaded", timeout=self._t(30000))
+                    await page.wait_for_timeout(1500)  # let AJAX table render
+                    bbb_url = await self._join_bbb_session(page, class_name)
+                    if bbb_url:
+                        logger.info(f"[{class_name}] ✓ Hold-joined on attempt {attempt}/{MAX_JOIN_ATTEMPTS}")
+                        break
+                except Exception as e:
+                    logger.warning(f"[{class_name}] Hold-join attempt {attempt} error: {e}")
+
+                if attempt < MAX_JOIN_ATTEMPTS:
+                    wait_secs = 5 + attempt * 3
+                    logger.info(f"[{class_name}] Button not found — retrying in {wait_secs}s (attempt {attempt}/{MAX_JOIN_ATTEMPTS})")
+                    await asyncio.sleep(wait_secs)
 
             if not bbb_url:
-                logger.warning(f"[{class_name}] Could not join BBB for hold — session may not be live")
+                logger.warning(f"[{class_name}] Could not join BBB for hold after {MAX_JOIN_ATTEMPTS} attempts")
                 return
 
             # Stay in the room: keepalive + auto-answer polls + خسته نباشید near end
-            await bbb.hold_with_presence(page, class_name, hold_until_ts)
+            await bbb.hold_with_presence(page, class_name, hold_until_ts, chat_id=chat_id)
         finally:
             await ctx.close()

@@ -86,50 +86,13 @@ class UserWorker:
         ]
 
     def _sleep_until_next(self) -> float:
-        """Return seconds to sleep before the next useful check.
+        """Always poll every CHECK_INTERVAL (10 min).
 
-        Classes with full schedule: sleep until 2 min before next class window
-        (capped at 1 h). Fallback (unscheduled/Nima): CHECK_INTERVAL (10 min).
+        We do NOT trust a scraped class timeline to decide when a class is live —
+        the only reliable signal is whether the join button is present on the
+        /panel/myLesson page, which we re-check every 10 minutes all day. Nima
+        attendance is still gated by its own window inside _check_cycle.
         """
-        has_all = (
-            not self.nima_classes
-            and self.main_classes
-            and all(c.get("days") and c.get("start") for c in self.main_classes)
-        )
-        if not has_all:
-            return CHECK_INTERVAL
-
-        now = datetime.now(tz=config.TIMEZONE)
-
-        # Inside a class window → keep checking at full rate
-        for cls in self.main_classes:
-            if now.weekday() not in cls["days"]:
-                continue
-            sh, sm = map(int, cls["start"].split(":"))
-            end_str = cls.get("end") or f"{sh+2}:{sm:02d}"
-            eh, em = map(int, end_str.split(":"))
-            window_start = now.replace(hour=sh, minute=sm, second=0, microsecond=0) - timedelta(minutes=2)
-            window_end   = now.replace(hour=eh, minute=em, second=0, microsecond=0) + timedelta(minutes=10)
-            if window_start <= now <= window_end:
-                return CHECK_INTERVAL
-
-        # Find next upcoming class across the week
-        soonest = None
-        for cls in self.main_classes:
-            sh, sm = map(int, cls["start"].split(":"))
-            for offset in range(1, 8):
-                candidate_day = (now.weekday() + offset) % 7
-                if candidate_day not in cls["days"]:
-                    continue
-                target = (now + timedelta(days=offset)).replace(
-                    hour=sh, minute=sm, second=0, microsecond=0)
-                wait = (target - now).total_seconds() - 120
-                if soonest is None or wait < soonest:
-                    soonest = wait
-                break
-
-        if soonest and soonest > CHECK_INTERVAL:
-            return min(soonest, 3600)
         return CHECK_INTERVAL
 
     def _in_nima_window(self, nima_cls: dict) -> bool:
@@ -192,7 +155,7 @@ class UserWorker:
                         self.nima_held[nima_name] = time.time() + HOLD_SECS
                         state.set_status(nima_name, "attended", chat_id=self.chat_id)
                         append_user_log(self.chat_id, f"✅ حاضری نیما ثبت شد: {nima_name}")
-                        await notify.send_async(f"✅ حاضری نیما ثبت شد: {nima_name}")
+                        await notify.send_async(f"✅ حاضری نیما ثبت شد: {nima_name}", chat_id=self.chat_id)
                         self._track(self._nima_hold(nima, nima_name))  # hold owns the browser now
                     else:
                         await nima.stop()
@@ -209,10 +172,11 @@ class UserWorker:
         async def _hold():
             lms = LMSMain(self.username, self.password)
             ok = False
+            deadline = time.time() + HOLD_SECS   # keep retrying login until class end
             try:
                 await lms.start()
                 try:
-                    ok = await lms.attend_class(name, [], lesson_url=url)
+                    ok = await lms.attend_class(name, [], lesson_url=url, deadline=deadline)
                 except Exception as e:
                     logger.warning(f"[user {self.chat_id}] join {name} error: {e}")
                 if not ok:
@@ -225,11 +189,11 @@ class UserWorker:
                     return
                 state.set_status(name, "attended", chat_id=self.chat_id)
                 append_user_log(self.chat_id, f"✅ حاضری ثبت شد: {name}")
-                await notify.send_async(f"✅ حاضری ثبت شد: {name}")
+                await notify.send_async(f"✅ حاضری ثبت شد: {name}", chat_id=self.chat_id)
                 # Presence hold (stay in room + polls + خسته نباشید) — ALWAYS runs;
                 # being present for the whole class is non-negotiable.
                 try:
-                    await lms.attend_and_hold(name, [], url, time.time() + HOLD_SECS)
+                    await lms.attend_and_hold(name, [], url, time.time() + HOLD_SECS, chat_id=self.chat_id)
                 except Exception as e:
                     logger.warning(f"[user {self.chat_id}] hold {name} error: {e}")
             finally:
@@ -243,7 +207,7 @@ class UserWorker:
     async def _nima_hold(self, nima: LMSNima, name: str):
         try:
             try:
-                await nima.attend_and_hold(name, [name], time.time() + HOLD_SECS)
+                await nima.attend_and_hold(name, [name], time.time() + HOLD_SECS, chat_id=self.chat_id)
             except Exception as e:
                 logger.warning(f"[user {self.chat_id}] nima hold {name} error: {e}")
         finally:
@@ -258,19 +222,20 @@ class UserWorker:
 
         # Check if setup is done
         if not users.is_setup_done(self.chat_id):
-            await notify.send_async("⚠️ هنوز کلاس‌هاتو مشخص نکردی. /setup رو بزن.")
+            await notify.send_async("⚠️ هنوز کلاس‌هاتو مشخص نکردی. /setup رو بزن.", chat_id=self.chat_id)
             return
 
         self._load_classes()
         total = len(self.main_classes) + len(self.nima_classes)
         if total == 0:
-            await notify.send_async("⚠️ هیچ کلاسی انتخاب نشده. /setup رو بزن.")
+            await notify.send_async("⚠️ هیچ کلاسی انتخاب نشده. /setup رو بزن.", chat_id=self.chat_id)
             return
 
         await notify.send_async(
             f"🟢 حاضری خودکار روشن شد.\n"
             f"📚 {len(self.main_classes)} فراروم + {len(self.nima_classes)} نیما\n"
-            f"سر هر کلاس برات حاضری می‌زنم و خبرت می‌کنم."
+            f"سر هر کلاس برات حاضری می‌زنم و خبرت می‌کنم.",
+            chat_id=self.chat_id
         )
         append_user_log(self.chat_id, f"🟢 ربات روشن شد — {total} کلاس")
 

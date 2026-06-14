@@ -371,6 +371,7 @@ class LMSNima:
         keywords: list[str],
         hold_until_ts: float,
         keepalive_interval: int = 600,
+        chat_id: str = None,
     ):
         ctx, page = await self._new_page()
         try:
@@ -383,6 +384,6 @@ class LMSNima:
             hold_page = session_page or page
 
             # Stay in the room: keepalive + auto-answer polls + خسته نباشید near end
-            await bbb.hold_with_presence(hold_page, class_name, hold_until_ts)
+            await bbb.hold_with_presence(hold_page, class_name, hold_until_ts, chat_id=chat_id)
         finally:
             await ctx.close()
